@@ -59,6 +59,16 @@ services:
       PHANTOM_LLM: ${PHANTOM_LLM:-openai/glm-4.6}
       BASALT_MODEL: ${BASALT_MODEL:-glm-4.6}
       REAL_SCAN_TIMEOUT_MIN: ${REAL_SCAN_TIMEOUT_MIN:-180}
+      # ── Plateformes distantes (DeepAudit / RedAmon) ──
+      # Déployez chaque plateforme (docker compose de son dépôt — voir README)
+      # puis déclarez la connexion ; sans ces variables : simulation honnête.
+      # DeepAudit doit être joignable depuis ce conteneur (réseau Docker ou hôte).
+      DEEPAUDIT_API_URL: ${DEEPAUDIT_API_URL:-}
+      DEEPAUDIT_EMAIL: ${DEEPAUDIT_EMAIL:-}
+      DEEPAUDIT_PASSWORD: ${DEEPAUDIT_PASSWORD:-}
+      REDAMON_API_URL: ${REDAMON_API_URL:-}
+      REDAMON_EMAIL: ${REDAMON_EMAIL:-}
+      REDAMON_PASSWORD: ${REDAMON_PASSWORD:-}
     volumes:
       - auditforge-data:/data
       # Sandbox Docker des outils réels (Phantom Kali, Basalt PoC) via le

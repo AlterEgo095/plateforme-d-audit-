@@ -362,7 +362,7 @@ export class ScanEngine {
         );
       } else if (mode === "real") {
         throw new Error(
-          `Aucun adaptateur réel pour ${cfg.tool} — DEEPAUDIT/REDAMON nécessitent le déploiement de leurs plateformes (voir README).`,
+          `Aucun adaptateur réel enregistré pour ${cfg.tool} (vérifier la configuration du moteur).`,
         );
       } else {
         pushLog(
@@ -607,7 +607,7 @@ export class ScanEngine {
   ): Promise<void> {
     const t0 = Date.now();
     const campaignId = cfg.campaignId;
-    const estMs = REAL_EXEC.estimatedMs(cfg.tool as "PHANTOM" | "BASALT", cfg.profile);
+    const estMs = REAL_EXEC.estimatedMs(cfg.tool, cfg.profile);
     let lastPhase = initialPhase;
 
     const abortController = new AbortController();
@@ -676,6 +676,19 @@ export class ScanEngine {
             );
           },
         });
+      } catch (err) {
+        // Annulation opérateur pendant l'outil → CANCELLED (jamais FAILED).
+        // Les adaptateurs lèvent en signalant l'abort à leurs processus /
+        // plateformes distantes ; sans ce garde, une annulation légitime
+        // serait comptabilisée comme un échec du moteur.
+        if (ctrl.aborted || abortController.signal.aborted) {
+          clearInterval(ticker);
+          pushLog("INFO", "systeme", "Scan annulé pendant l'exécution réelle — finalisation CANCELLED.");
+          await flushPending();
+          await this.finalizeCancelled(cfg, campaignId, t0, st, lastPhase);
+          return;
+        }
+        throw err;
       } finally {
         clearInterval(ticker);
       }

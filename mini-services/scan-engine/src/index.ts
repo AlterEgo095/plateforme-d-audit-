@@ -351,7 +351,7 @@ async function route(req: IncomingMessage, res: ServerResponse, engine: ScanEngi
             tool,
             mode,
             realAvailable: false,
-            reason: "adaptateur réel non implémenté — plateforme dédiée requise (DeepAudit/RedAmon)",
+            reason: "aucun adaptateur réel enregistré pour cet outil",
           });
           continue;
         }

@@ -1,0 +1,71 @@
+# ── AuditForge — orchestration complète (VPS auto-hébergé) ──────────────────
+# Usage :
+#   1. cp .env.example .env   puis renseignez AUTH_SECRET / ENGINE_INTERNAL_TOKEN
+#   2. docker compose up -d --build
+#   3. Interface : http://<votre-domaine-ou-ip>/  (HTTPS automatique si SITE_DOMAIN est défini)
+#
+# Architecture réseau : seul Caddy est exposé (80/443). `app` et `engine`
+# vivent sur le réseau interne Docker — `engine` n'est JAMAIS publié sur l'hôte.
+
+name: auditforge
+
+services:
+  # ── Application Next.js : frontend + API REST ─────────────────────────────
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: file:/data/auditforge.db
+      AUTH_SECRET: ${AUTH_SECRET:?Renseignez AUTH_SECRET dans le fichier .env (openssl rand -hex 32)}
+      ENGINE_INTERNAL_TOKEN: ${ENGINE_INTERNAL_TOKEN:?Renseignez ENGINE_INTERNAL_TOKEN dans le fichier .env (openssl rand -hex 32)}
+      ENGINE_URL: http://engine:3030
+    volumes:
+      - auditforge-data:/data
+    restart: unless-stopped
+    # Aucun `ports:` : l'application n'est joignable que via le reverse proxy.
+
+  # ── Moteur d'exécution des scans (socket.io + /internal/*) ────────────────
+  engine:
+    build:
+      context: .
+      dockerfile: Dockerfile.engine
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: file:/data/auditforge.db
+      AUTH_SECRET: ${AUTH_SECRET:?Renseignez AUTH_SECRET dans le fichier .env (openssl rand -hex 32)}
+      ENGINE_INTERNAL_TOKEN: ${ENGINE_INTERNAL_TOKEN:?Renseignez ENGINE_INTERNAL_TOKEN dans le fichier .env (openssl rand -hex 32)}
+      BIND_HOST: 0.0.0.0
+      PORT: "3030"
+    volumes:
+      - auditforge-data:/data
+    restart: unless-stopped
+    depends_on:
+      app:
+        condition: service_healthy # le schéma est appliqué au boot de `app`
+    # Aucun `ports:` : moteur strictement confiné au réseau interne Docker.
+
+  # ── Reverse proxy : unique point d'entrée (80/443) ────────────────────────
+  caddy:
+    image: caddy:2-alpine
+    ports:
+      - "${HTTP_PORT:-80}:80"
+      - "${HTTPS_PORT:-443}:443"
+    environment:
+      SITE_DOMAIN: ${SITE_DOMAIN:-:80}
+    volumes:
+      - ./Caddyfile.docker:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    restart: unless-stopped
+    depends_on:
+      app:
+        condition: service_healthy
+      engine:
+        condition: service_started
+
+volumes:
+  auditforge-data: # base SQLite partagée (app ⇄ moteur, mode WAL)
+  caddy-data: # certificats TLS (HTTPS automatique)
+  caddy-config:

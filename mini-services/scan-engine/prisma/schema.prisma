@@ -1,0 +1,94 @@
+// AuditForge - Plateforme d'audit unifiée
+// Schéma de persistance (SQLite via Prisma)
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id           String     @id @default(cuid())
+  username     String     @unique
+  passwordHash String
+  role         String     @default("VIEWER") // ADMIN | AUDITOR | VIEWER
+  mfaEnabled   Boolean    @default(false)
+  createdAt    DateTime   @default(now())
+  campaigns    Campaign[]
+}
+
+model Campaign {
+  id          String   @id @default(cuid())
+  name        String
+  description String?
+  target      String
+  targetType  String // URL | GIT | NETWORK
+  profile     String // QUICK | STANDARD | DEEP
+  status      String   @default("DRAFT") // DRAFT | RUNNING | COMPLETED | FAILED | CANCELLED
+  createdById String
+  createdBy   User     @relation(fields: [createdById], references: [id])
+  createdAt   DateTime @default(now())
+  scans       Scan[]
+}
+
+model Scan {
+  id            String    @id @default(cuid())
+  campaignId    String
+  campaign      Campaign  @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  tool          String // PHANTOM | DEEPAUDIT | BASALT | REDAMON
+  target        String
+  status        String    @default("QUEUED") // QUEUED | RUNNING | COMPLETED | FAILED | CANCELLED
+  progress      Int       @default(0)
+  phase         String    @default("")
+  startedAt     DateTime?
+  finishedAt    DateTime?
+  durationMs    Int?
+  findingsCount Int       @default(0)
+  criticalCount Int       @default(0)
+  createdAt     DateTime  @default(now())
+  findings      Finding[]
+  logs          ScanLog[]
+}
+
+model Finding {
+  id                String   @id @default(cuid())
+  scanId            String
+  scan              Scan     @relation(fields: [scanId], references: [id], onDelete: Cascade)
+  tool              String
+  title             String
+  severity          String // CRITICAL | HIGH | MEDIUM | LOW | INFO
+  confidence        String // CONFIRMED | PROBABLE | UNVERIFIED
+  category          String // injection, xss, auth, crypto, recon, secrets, dos, ...
+  cve               String?
+  cvss              Float?
+  location          String?
+  description       String
+  evidence          String
+  poc               String
+  sentinelTriggered Boolean  @default(false)
+  status            String   @default("OPEN") // OPEN | CONFIRMED | FALSE_POSITIVE | FIXED
+  remediation       String?
+  createdAt         DateTime @default(now())
+}
+
+model ScanLog {
+  id      Int      @id @default(autoincrement())
+  scanId  String
+  scan    Scan     @relation(fields: [scanId], references: [id], onDelete: Cascade)
+  ts      DateTime @default(now())
+  level   String // INFO | CMD | WARN | ERROR | SUCCESS | TOOL | AGENT
+  source  String
+  message String
+}
+
+model AuditTrail {
+  id        Int      @id @default(autoincrement())
+  actor     String
+  action    String
+  resource  String
+  detail    String?
+  createdAt DateTime @default(now())
+}

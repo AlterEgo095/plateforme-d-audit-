@@ -1,0 +1,15 @@
+# ── AuditForge — reverse proxy (conteneur Caddy) ────────────────────────────
+# SITE_DOMAIN est fourni par docker-compose :
+#   - non défini (défaut « :80 ») → HTTP uniquement (test / réseau local)
+#   - « audit.exemple.com »       → HTTPS automatique (certificats Let's Encrypt)
+
+{$SITE_DOMAIN} {
+	encode zstd gzip
+
+	# Temps réel — socket.io du moteur d'exécution (path par défaut).
+	# WebSocket géré nativement par reverse_proxy.
+	reverse_proxy /socket.io/* engine:3030
+
+	# Tout le reste (frontend + API REST) → application Next.js.
+	reverse_proxy app:3000
+}

@@ -1,0 +1,24 @@
+# ── AuditForge — image du moteur d'exécution (mini-services/scan-engine) ────
+# Service socket.io + API interne /internal/* (simulation des outils d'audit).
+
+# ── 1) Dépendances + génération du client Prisma ────────────────────────────
+FROM oven/bun:1 AS build
+WORKDIR /engine
+# Le schéma est requis avant l'installation (postinstall @prisma/client).
+COPY mini-services/scan-engine/package.json mini-services/scan-engine/bun.lock ./
+COPY mini-services/scan-engine/prisma ./prisma
+RUN bun install --frozen-lockfile
+COPY mini-services/scan-engine/src ./src
+RUN bunx prisma generate
+
+# ── 2) Exécution ────────────────────────────────────────────────────────────
+FROM oven/bun:1 AS runner
+WORKDIR /engine
+ENV NODE_ENV=production
+COPY --from=build /engine /engine
+EXPOSE 3030
+
+# BIND_HOST est fourni par docker-compose (0.0.0.0 dans le réseau interne
+# compose uniquement — le port n'est jamais publié sur l'hôte).
+# exec direct (sans `bun run`) : SIGTERM délivré au processus → arrêt gracieux.
+CMD ["bun", "src/index.ts"]

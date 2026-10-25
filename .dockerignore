@@ -1,0 +1,40 @@
+# ── Contexte de build Docker — exclusions ───────────────────────────────────
+# Dépendances et artefacts (recréés dans l'image)
+node_modules
+**/node_modules
+.next
+out
+build
+
+# Git
+.git
+.gitignore
+
+# Secrets et environnement local — JAMAIS dans l'image
+.env
+.env.*
+!.env.example
+
+# Données locales
+db/*.db
+db/*.db-shm
+db/*.db-wal
+db/*.db-journal
+
+# Journaux
+*.log
+
+# Périmètre hors plateforme
+skills
+examples
+tests
+tool-results
+agent-ctx
+download
+upload
+.zscripts
+
+# Divers
+.DS_Store
+.vercel
+coverage

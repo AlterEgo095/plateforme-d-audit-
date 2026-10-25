@@ -68,6 +68,8 @@ export function ReportsView({
   const [error, setError] = useState<string | null>(null);
   /** Jeton de séquence : ignore les réponses de fetch obsolètes. */
   const seqRef = useRef(0);
+  /** Jeton de séquence dédié à generate() (indépendant de loadList). */
+  const genSeqRef = useRef(0);
 
   const loadList = useCallback(async () => {
     const seq = ++seqRef.current;
@@ -91,14 +93,17 @@ export function ReportsView({
 
   const generate = useCallback(
     async (scanId: string) => {
+      const seq = ++genSeqRef.current;
       setGenerating(scanId);
       setError(null);
       try {
         const res = await apiGet<{ report: ReportData }>(
           `/api/reports/${scanId}`
         );
+        if (seq !== genSeqRef.current) return; // réponse obsolète
         setReport(res.report);
       } catch (e) {
+        if (seq !== genSeqRef.current) return; // erreur obsolète
         setReport(null);
         toast({
           title: "Erreur",
@@ -106,7 +111,7 @@ export function ReportsView({
           variant: "destructive",
         });
       } finally {
-        setGenerating(null);
+        if (seq === genSeqRef.current) setGenerating(null);
       }
     },
     [toast]

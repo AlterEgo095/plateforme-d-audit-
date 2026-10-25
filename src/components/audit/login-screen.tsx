@@ -86,12 +86,7 @@ export function LoginScreen({ onLogin }: { onLogin: (user: UserDTO) => void }) {
       <Card className="relative w-full max-w-sm shadow-xl">
         <CardHeader className="items-center space-y-3 text-center">
           <div
-            className="mx-auto flex size-14 items-center justify-center rounded-full border-2"
-            style={{
-              borderColor: "oklch(0.696 0.17 162.48 / 0.5)",
-              backgroundColor: "oklch(0.696 0.17 162.48 / 0.1)",
-              color: "#34d399",
-            }}
+            className="border-primary/50 bg-primary/10 text-primary mx-auto flex size-14 items-center justify-center rounded-full border-2"
             aria-hidden
           >
             <Shield className="size-7" />
@@ -223,7 +218,7 @@ export function LoginScreen({ onLogin }: { onLogin: (user: UserDTO) => void }) {
                 <button
                   key={acc.username}
                   type="button"
-                  className="hover:bg-accent hover:text-accent-foreground inline-flex min-h-9 items-center gap-1.5 rounded-full border px-3 py-1.5 text-xs transition-colors"
+                  className="hover:bg-accent hover:text-accent-foreground inline-flex min-h-11 sm:min-h-9 items-center gap-1.5 rounded-full border px-3 py-1.5 text-xs transition-colors"
                   aria-label={`Remplir les identifiants du compte ${acc.role}`}
                   onClick={() => {
                     setUsername(acc.username);

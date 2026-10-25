@@ -16,7 +16,6 @@
  * Prérequis : Docker (sandbox Kali, ~13 Go au premier lancement).
  */
 
-import { join } from "node:path";
 import { REAL_EXEC } from "./env";
 import { prepareTarget } from "./git-target";
 import { probeVersion, runStreaming } from "./proc";
@@ -74,7 +73,6 @@ function extractJsonOutput(stdoutTail: string): Record<string, unknown> | null {
 
 export class PhantomAdapter implements RealToolAdapter {
   readonly tool = "PHANTOM" as const;
-  private activeProcHint: { kill: () => void } | null = null;
 
   async checkAvailable(): Promise<RealAvailability> {
     const version = await probeVersion(REAL_EXEC.phantomBin);
@@ -96,9 +94,8 @@ export class PhantomAdapter implements RealToolAdapter {
     return { available: true, version };
   }
 
-  cancel(): void {
-    this.activeProcHint?.kill();
-  }
+  // m6 (audit 8-a) : pas de cancel() ici — l'annulation passe exclusivement
+  // par le AbortSignal (kill arborescent du process group dans runStreaming).
 
   async run(ctx: RealAdapterContext): Promise<RealFinding[]> {
     const target = await prepareTarget(ctx);
@@ -193,9 +190,4 @@ export class PhantomAdapter implements RealToolAdapter {
     );
     return findings;
   }
-}
-
-/** Chemin du dossier de runs Phantom (utile pour le débogage sur le VPS). */
-export function phantomRunsDir(workdir: string): string {
-  return join(workdir, "phantom_runs");
 }

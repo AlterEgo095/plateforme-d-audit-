@@ -83,6 +83,8 @@ export interface CampaignDTO {
   createdById: string;
   createdByName: string;
   scans: ScanDTO[];
+  /** Nombre TOTAL de scans de la campagne (peut dépasser scans.length, liste tronquée). */
+  scansCount: number;
   findingsCount: number;
   criticalCount: number;
 }

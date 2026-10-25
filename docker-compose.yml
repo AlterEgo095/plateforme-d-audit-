@@ -22,6 +22,12 @@ services:
       AUTH_SECRET: ${AUTH_SECRET:?Renseignez AUTH_SECRET dans le fichier .env (openssl rand -hex 32)}
       ENGINE_INTERNAL_TOKEN: ${ENGINE_INTERNAL_TOKEN:?Renseignez ENGINE_INTERNAL_TOKEN dans le fichier .env (openssl rand -hex 32)}
       ENGINE_URL: http://engine:3030
+      # ── Comptes au premier démarrage (C2) ──
+      # Par défaut (production) : AUCUN compte de démonstration. Définissez le
+      # premier administrateur dans le .env, ou forcez DEMO_SEED=1 (démo only).
+      DEMO_SEED: ${DEMO_SEED:-0}
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
     volumes:
       - auditforge-data:/data
     restart: unless-stopped
@@ -38,7 +44,10 @@ services:
       AUTH_SECRET: ${AUTH_SECRET:?Renseignez AUTH_SECRET dans le fichier .env (openssl rand -hex 32)}
       ENGINE_INTERNAL_TOKEN: ${ENGINE_INTERNAL_TOKEN:?Renseignez ENGINE_INTERNAL_TOKEN dans le fichier .env (openssl rand -hex 32)}
       BIND_HOST: 0.0.0.0
-      PORT: "3030"
+      # ── Limites de ressources ──
+      MAX_CONCURRENT_SCANS: ${MAX_CONCURRENT_SCANS:-3}
+      # CORS socket.io : URL publique du site (si définie dans le .env)
+      SITE_ORIGIN: ${SITE_ORIGIN:-}
       # ── Exécution réelle des outils ──
       # simulation : aucune cible touchée | auto : réel si disponible | real : réel strict
       TOOL_EXECUTION_MODE: ${TOOL_EXECUTION_MODE:-auto}
@@ -70,6 +79,7 @@ services:
   #     dockerfile: Dockerfile.bridge
   #   environment:
   #     LLM_BRIDGE_KEY: ${LLM_BRIDGE_KEY:-}
+  #     BIND_HOST: 0.0.0.0
   #   restart: unless-stopped
 
   # ── Reverse proxy : unique point d'entrée (80/443) ────────────────────────

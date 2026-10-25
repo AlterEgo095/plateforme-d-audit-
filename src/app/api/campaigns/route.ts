@@ -12,7 +12,7 @@ import { requireAuth } from '@/lib/auth'
 import { writeAudit } from '@/lib/audit'
 import { engineRun } from '@/lib/engine-client'
 import { refreshCampaignStatuses } from '@/lib/campaign-status'
-import { PROFILES, TARGET_TYPES, TOOLS, isToolCompatible, toCampaignDTO } from '@/lib/dto'
+import { PROFILES, TARGET_TYPES, TOOLS, isToolCompatible, toCampaignDTO, validateTarget } from '@/lib/dto'
 import { withCampaignLock } from '@/lib/mutex'
 import { withApi } from '@/lib/route-handler'
 import type { Profile, Tool } from '@/lib/types'
@@ -33,9 +33,25 @@ export const GET = withApi(async () => {
     include: {
       createdBy: { select: { username: true } },
       scans: { orderBy: { createdAt: 'asc' }, take: 50 },
+      _count: { select: { scans: true } },
     },
   })
-  return NextResponse.json({ campaigns: campaigns.map(toCampaignDTO) })
+  // m9 (audit 8-a) : totaux EXACTS (au-delà des 50 scans inclus) via agrégats.
+  const totals = await db.scan.groupBy({
+    by: ['campaignId'],
+    where: { campaignId: { in: campaigns.map((c) => c.id) } },
+    _sum: { findingsCount: true, criticalCount: true },
+  })
+  const totalsByCampaign = new Map(totals.map((t) => [t.campaignId, t._sum]))
+  return NextResponse.json({
+    campaigns: campaigns.map((c) =>
+      toCampaignDTO(c, {
+        scansCount: c._count.scans,
+        findingsCount: totalsByCampaign.get(c.id)?.findingsCount ?? 0,
+        criticalCount: totalsByCampaign.get(c.id)?.criticalCount ?? 0,
+      })
+    ),
+  })
 })
 
 // ─── POST /api/campaigns ─────────────────────────────────────────────
@@ -78,6 +94,13 @@ export const POST = withApi(async (req: NextRequest) => {
       { error: `Outil ${incompatible} incompatible avec une cible de type ${input.targetType}` },
       { status: 400 }
     )
+  }
+
+  // C1 (audit 8-a) : schéma strict par type de cible — bloque l'injection
+  // d'options/transport dans les CLI du moteur (git clone, phantom…).
+  const targetError = validateTarget(input.targetType, input.target)
+  if (targetError) {
+    return NextResponse.json({ error: targetError }, { status: 400 })
   }
 
   // Création atomique campagne + scans (§L.10) — la transaction ne contient que des écritures DB.
@@ -139,6 +162,17 @@ export const POST = withApi(async (req: NextRequest) => {
       const failedIds = scans
         .filter((_, i) => results[i].status === 'rejected')
         .map((s) => s.id)
+      // i1 (audit 8-a) : motifs distincts des échecs — le message réel du
+      // moteur (ex. « Trop de scans simultanés ») remonte à l'utilisateur.
+      const launchReasons = Array.from(
+        new Set(
+          results
+            .filter((r): r is PromiseRejectedResult => r.status === 'rejected')
+            .map((r) => (r.reason instanceof Error ? r.reason.message : String(r.reason)))
+        )
+      ).slice(0, 2)
+      const reasonSuffix =
+        launchReasons.length > 0 ? ` — ${launchReasons.join(' ; ').slice(0, 300)}` : ''
       if (failedIds.length > 0) {
         // Seuls les scans dont l'appel moteur a échoué sont marqués FAILED.
         await db.scan.updateMany({
@@ -154,12 +188,12 @@ export const POST = withApi(async (req: NextRequest) => {
       })
 
       if (allFailed) {
-        const msg = "Moteur d'exécution indisponible — scans marqués en échec."
+        const msg = `Lancement impossible — scans marqués en échec${reasonSuffix}`
         await writeAudit(session.username, 'CAMPAIGN_LAUNCH', campaign.name, msg)
         return msg
       }
       if (failedIds.length > 0) {
-        const msg = "Moteur d'exécution indisponible pour certains scans."
+        const msg = `Lancement impossible pour certains scans${reasonSuffix}`
         await writeAudit(
           session.username,
           'CAMPAIGN_LAUNCH',

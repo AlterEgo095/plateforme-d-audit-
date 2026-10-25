@@ -91,8 +91,11 @@ export function ensureSocket(): Promise<Socket | null> {
       auth: token ? { token } : {},
     });
 
-    // Reconnexion : ré-émettre scan:subscribe pour toutes les rooms.
+    // Reconnexion : ré-émettre scan:subscribe pour toutes les rooms et
+    // ré-armer la récupération d'auth (le token a un TTL de 8 h : un futur
+    // rejet « unauthorized » doit pouvoir déclencher un nouveau cycle).
     socket.on("connect", () => {
+      authRecoveryDone = false;
       for (const scanId of subscribedScans) {
         socket.emit("scan:subscribe", { scanId });
       }
@@ -118,6 +121,21 @@ export function ensureSocket(): Promise<Socket | null> {
   })();
 
   return socketPromise;
+}
+
+/**
+ * Purge complète de l'état socket (déconnexion / changement de session) :
+ * invalide le token caché, déconnecte le singleton s'il existe, réinitialise
+ * la promesse mémorisée et les rooms souscrites. La prochaine connexion
+ * (ensureSocket) repart donc d'un token frais.
+ */
+export function resetSocketState(): void {
+  invalidateToken();
+  authRecoveryDone = false;
+  socketInstance?.disconnect();
+  socketInstance = null;
+  socketPromise = null;
+  subscribedScans.clear();
 }
 
 /** État de connexion au moteur (true dès l'événement "connect"). */
@@ -202,7 +220,7 @@ export function subscribeScan(scanId: string): void {
 /** Quitte la room `scan:{scanId}` du moteur (et oublie l'id). */
 export function unsubscribeScan(scanId: string): void {
   subscribedScans.delete(scanId);
-  void ensureSocket().then((s) => {
-    s?.emit("scan:unsubscribe", { scanId });
-  });
+  // N'utilise PAS ensureSocket() : un désabonnement (ex. démontage après
+  // déconnexion) ne doit jamais provoquer la création d'un socket.
+  socketInstance?.emit("scan:unsubscribe", { scanId });
 }

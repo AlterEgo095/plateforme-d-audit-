@@ -115,10 +115,15 @@ export function ScanDetail({
   const nearBottomRef = useRef(true);
   /** Compteur monotone pour les ids négatifs des logs live (clés React stables). */
   const liveSeqRef = useRef(0);
+  /** Jeton de séquence : ignore les réponses de fetch obsolètes. */
+  const seqRef = useRef(0);
+  const [activeTab, setActiveTab] = useState("terminal");
 
   const refreshScan = useCallback(async (id: string) => {
+    const seq = ++seqRef.current;
     try {
       const d = await apiGet<ScanDetailData>(`/api/scans/${id}`);
+      if (seq !== seqRef.current) return; // réponse obsolète
       setData(d);
     } catch {
       // Silencieux : le panneau conserve les données déjà chargées.
@@ -129,6 +134,7 @@ export function ScanDetail({
   useEffect(() => {
     if (!open || !scanId) return;
     let cancelled = false;
+    const seq = ++seqRef.current;
     setLoading(true);
     nearBottomRef.current = true;
     setLogs([]);
@@ -138,7 +144,7 @@ export function ScanDetail({
           apiGet<ScanDetailData>(`/api/scans/${scanId}`),
           apiGet<{ logs: LogEntry[] }>(`/api/scans/${scanId}/logs?limit=500`),
         ]);
-        if (cancelled) return;
+        if (cancelled || seq !== seqRef.current) return; // réponse obsolète
         setData(detail);
         // Fusion (pas remplacement) : on conserve les logs live (id < 0)
         // reçus pendant le chargement qui sont PLUS RÉCENTS que le dernier
@@ -160,7 +166,7 @@ export function ScanDetail({
           );
         });
       } catch (e) {
-        if (!cancelled) {
+        if (!cancelled && seq === seqRef.current) {
           toast({
             title: "Erreur",
             description: getErrorMessage(e),
@@ -168,7 +174,7 @@ export function ScanDetail({
           });
         }
       } finally {
-        if (!cancelled) setLoading(false);
+        if (!cancelled && seq === seqRef.current) setLoading(false);
       }
     })();
     // L'abonnement attend le socket asynchrone (auth token + handshake).
@@ -235,11 +241,17 @@ export function ScanDetail({
   });
 
   // Auto-scroll du terminal si l'utilisateur est proche du bas (< 60 px).
+  // Dépend aussi de l'onglet actif : au retour sur l'onglet Terminal, on
+  // rejoue le scroll — en requestAnimationFrame pour garantir que la mise en
+  // page du contenu (potentiellement re-devenu visible) est calculée.
   useEffect(() => {
-    const el = terminalRef.current;
-    if (!el || !nearBottomRef.current) return;
-    el.scrollTop = el.scrollHeight;
-  }, [logs]);
+    if (activeTab !== "terminal" || !nearBottomRef.current) return;
+    const raf = requestAnimationFrame(() => {
+      const el = terminalRef.current;
+      if (el) el.scrollTop = el.scrollHeight;
+    });
+    return () => cancelAnimationFrame(raf);
+  }, [logs, activeTab]);
 
   const onTerminalScroll = () => {
     const el = terminalRef.current;
@@ -336,7 +348,11 @@ export function ScanDetail({
               <Skeleton className="h-full w-full" />
             </div>
           ) : scan && data ? (
-            <Tabs defaultValue="terminal" className="flex min-h-0 flex-1 flex-col gap-0">
+            <Tabs
+              value={activeTab}
+              onValueChange={setActiveTab}
+              className="flex min-h-0 flex-1 flex-col gap-0"
+            >
               <div className="shrink-0 border-b px-4 pt-2">
                 <TabsList className="grid h-10 w-full grid-cols-3 sm:w-96">
                   <TabsTrigger value="terminal">Terminal</TabsTrigger>
@@ -347,9 +363,11 @@ export function ScanDetail({
                 </TabsList>
               </div>
 
-              {/* Onglet Terminal */}
+              {/* Onglet Terminal — forceMount : le journal reste monté (position
+                  de scroll conservée) et masqué en CSS via data-state=inactive */}
               <TabsContent
                 value="terminal"
+                forceMount
                 className="min-h-0 flex-1 data-[state=inactive]:hidden"
               >
                 <div

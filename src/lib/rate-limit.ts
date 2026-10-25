@@ -14,6 +14,10 @@
 
 const WINDOW_MS = 10 * 60 * 1000 // 10 minutes
 const MAX_FAILURES = 5
+// i6 (audit 8-a) : plafond du nombre de clés suivies — un spray d'identifiants
+// uniques avec X-Forwarded-For falsifiés ne peut pas faire croître la Map
+// indéfiniment (fuite mémoire).
+const MAX_KEYS = 5000
 
 interface FailureRecord {
   /** Horodatages (ms) des échecs récents (triés croissant, fenêtre glissante). */
@@ -48,6 +52,15 @@ if (!g.__afRateLimitTimer) {
 /** Enregistre un échec d'authentification pour la clé donnée. */
 export function registerLoginFailure(key: string): void {
   const now = Date.now()
+  // i6 : plafond de clés — purge des expirées puis éviction FIFO si nécessaire.
+  if (store.size >= MAX_KEYS) {
+    pruneExpired(now)
+    while (store.size >= MAX_KEYS) {
+      const oldest = store.keys().next().value
+      if (oldest === undefined) break
+      store.delete(oldest)
+    }
+  }
   const record = store.get(key) ?? { timestamps: [] }
   record.timestamps = record.timestamps.filter((t) => now - t < WINDOW_MS)
   record.timestamps.push(now)

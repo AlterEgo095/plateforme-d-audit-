@@ -27,7 +27,13 @@ export const GET = withApi<{ id: string }>(async (_req, { params }) => {
     return NextResponse.json({ error: 'Scan introuvable' }, { status: 404 })
   }
 
-  const findings = await db.finding.findMany({ where: { scanId: id } })
+  // m10 (audit 8-a) : réponse bornée — un scan réel très bavard ne peut pas
+  // saturer la mémoire/le réseau (2000 constats max, tri applicatif ensuite).
+  const findings = await db.finding.findMany({
+    where: { scanId: id },
+    take: 2000,
+    orderBy: { createdAt: 'desc' },
+  })
 
   return NextResponse.json({
     scan: toScanDTO(scan, scan.campaign.name),

@@ -356,7 +356,7 @@ function CampaignCard({
     (s) => s.status === "RUNNING" || s.status === "QUEUED"
   );
   const canRelaunch =
-    user.role !== "VIEWER" && !hasRunning && campaign.scans.length > 0;
+    user.role !== "VIEWER" && !hasRunning && campaign.scansCount > 0;
 
   return (
     <Card className="flex flex-col gap-0 overflow-hidden">
@@ -396,7 +396,7 @@ function CampaignCard({
           )}
         </div>
 
-        {/* Progression par scan */}
+        {/* Progression par scan (liste tronquée à 50 — le total réel est scansCount) */}
         {campaign.scans.length > 0 && (
           <div className="space-y-1.5">
             {campaign.scans.map((scan) => (
@@ -429,7 +429,7 @@ function CampaignCard({
           <Button
             variant="outline"
             size="sm"
-            className="h-9 flex-1 sm:flex-none"
+            className="h-11 sm:h-9 flex-1 sm:flex-none"
             onClick={() => onViewScansFor(campaign.id)}
           >
             <Table2 className="size-4" aria-hidden />
@@ -439,7 +439,7 @@ function CampaignCard({
             <Button
               variant="secondary"
               size="sm"
-              className="h-9 flex-1 sm:flex-none"
+              className="h-11 sm:h-9 flex-1 sm:flex-none"
               disabled={relaunching}
               onClick={() => onRelaunch(campaign)}
             >

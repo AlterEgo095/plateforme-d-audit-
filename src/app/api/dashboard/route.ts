@@ -75,6 +75,6 @@ export const GET = withApi(async () => {
     severityDistribution,
     toolDistribution,
     recentScans: recentScanRows.map((s) => toScanDTO(s, s.campaign.name)),
-    campaigns: campaignRows.map(toCampaignDTO),
+    campaigns: campaignRows.map((c) => toCampaignDTO(c)),
   })
 })

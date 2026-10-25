@@ -5,7 +5,9 @@
  * éviter les exécutions concurrentes). Idempotent : chaque bloc re-vérifie les
  * compteurs avant d'insérer. Ne lève jamais vers l'appelant.
  *
- * Contrats : comptes §C, journal d'audit §E.
+ * Contrats : comptes §C, journal d'audit §E. C2 (audit 8-a) : le seed des
+ * comptes de DÉMONSTRATION (identifiants publics du README) est conditionné —
+ * jamais automatiquement en production ; amorçage via ADMIN_USERNAME/ADMIN_PASSWORD.
  */
 import { db } from '@/lib/db'
 import { hashPassword } from '@/lib/auth'
@@ -255,31 +257,85 @@ const BASALT_LOGS: LogSeed[] = [
 
 // ─── Corps du seed ───────────────────────────────────────────────────
 
+/**
+ * C2 (audit 8-a) : les comptes de démonstration ont des identifiants PUBLICS
+ * (README GitHub). Sur un VPS fraîchement déployé, ils équivaut à un accès
+ * admin mondial. Politique :
+ * - DEMO_SEED=1    → seed de démo forcé (démo/dev explicite)
+ * - DEMO_SEED=0    → seed interdit (production durcie)
+ * - défaut         → seed uniquement hors production
+ */
+function demoSeedEnabled(): boolean {
+  const v = process.env.DEMO_SEED
+  if (v === '1') return true
+  if (v === '0') return false
+  return process.env.NODE_ENV !== 'production'
+}
+
+/**
+ * Amorçage production : crée un premier compte ADMIN depuis les variables
+ * d'environnement ADMIN_USERNAME/ADMIN_PASSWORD (sans MFA — à activer ensuite).
+ * Retourne true si le compte a été créé.
+ */
+async function bootstrapAdmin(): Promise<boolean> {
+  const username = process.env.ADMIN_USERNAME?.trim()
+  const password = process.env.ADMIN_PASSWORD
+  if (!username || !password) return false
+  await db.user.create({
+    data: {
+      username,
+      passwordHash: hashPassword(password),
+      role: 'ADMIN',
+      mfaEnabled: false,
+    },
+  })
+  await db.auditTrail.create({
+    data: {
+      actor: 'système',
+      action: 'SEED',
+      resource: 'users',
+      detail: `Compte administrateur initial créé (${username}) via ADMIN_USERNAME/ADMIN_PASSWORD`,
+    },
+  })
+  console.log(`[seed] compte administrateur initial créé : ${username}`)
+  return true
+}
+
 async function runSeed(): Promise<void> {
   await applyPragmas()
   const now = Date.now()
 
-  // 1) Comptes de démonstration (worklog §C)
+  // 1) Comptes : démonstration (mode démo uniquement) OU administrateur d'amorçage
   if ((await db.user.count()) === 0) {
-    await db.user.createMany({
-      data: [
-        { username: 'admin', passwordHash: hashPassword('Admin123!'), role: 'ADMIN', mfaEnabled: true },
-        { username: 'auditeur', passwordHash: hashPassword('Audit123!'), role: 'AUDITOR', mfaEnabled: false },
-        { username: 'observateur', passwordHash: hashPassword('View123!'), role: 'VIEWER', mfaEnabled: false },
-      ],
-    })
-    await db.auditTrail.create({
-      data: {
-        actor: 'système',
-        action: 'SEED',
-        resource: 'users',
-        detail: 'Comptes de démonstration créés (admin, auditeur, observateur)',
-      },
-    })
+    if (demoSeedEnabled()) {
+      await db.user.createMany({
+        data: [
+          { username: 'admin', passwordHash: hashPassword('Admin123!'), role: 'ADMIN', mfaEnabled: true },
+          { username: 'auditeur', passwordHash: hashPassword('Audit123!'), role: 'AUDITOR', mfaEnabled: false },
+          { username: 'observateur', passwordHash: hashPassword('View123!'), role: 'VIEWER', mfaEnabled: false },
+        ],
+      })
+      await db.auditTrail.create({
+        data: {
+          actor: 'système',
+          action: 'SEED',
+          resource: 'users',
+          detail: 'Comptes de démonstration créés (admin, auditeur, observateur)',
+        },
+      })
+    } else {
+      const created = await bootstrapAdmin()
+      if (!created) {
+        console.warn(
+          '[seed] aucun compte créé : définissez ADMIN_USERNAME/ADMIN_PASSWORD (amorçage production) ' +
+            'ou DEMO_SEED=1 (comptes de démonstration, identifiants publics)',
+        )
+      }
+    }
   }
 
-  // 2) Campagne de démonstration (propriété d'admin)
-  if ((await db.campaign.count()) === 0) {
+  // 2) Campagne de démonstration (propriété d'admin) — mode démo uniquement
+  if (demoSeedEnabled() && (await db.campaign.count()) === 0) {
     const admin = await db.user.findUnique({ where: { username: 'admin' } })
     if (admin) {
       const campaignCreatedAt = new Date(now - 3 * 3_600_000)

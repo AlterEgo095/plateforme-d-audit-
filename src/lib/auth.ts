@@ -8,7 +8,7 @@
  * - RBAC : VIEWER (lecture) < AUDITOR < ADMIN
  */
 import { createHmac, randomBytes, scryptSync, timingSafeEqual } from 'node:crypto'
-import { cookies } from 'next/headers'
+import { cookies, headers } from 'next/headers'
 import { NextResponse } from 'next/server'
 import type { Role } from '@/lib/types'
 
@@ -105,7 +105,24 @@ export async function getSession(): Promise<Session | null> {
   return parseSession(store.get(SESSION_COOKIE)?.value)
 }
 
-/** Pose le cookie de session (httpOnly, lax, path=/, 8 h, secure en production). Valide uniquement dans un route handler. */
+/**
+ * M1 (audit 8-a) : décide si le cookie doit être `Secure` en se fiant au
+ * protocole réellement vu par le client (X-Forwarded-Proto, posé par Caddy ou
+ * tout reverse proxy) plutôt qu'à NODE_ENV — sinon un déploiement HTTP
+ * (SITE_DOMAIN absent, chemin documenté du README) casse le login : les
+ * navigateurs rejettent un cookie Secure sur du HTTP non-localhost.
+ * Override explicite possible via COOKIE_SECURE=1|0.
+ */
+async function sessionCookieSecure(): Promise<boolean> {
+  const override = process.env.COOKIE_SECURE
+  if (override === '1') return true
+  if (override === '0') return false
+  const h = await headers()
+  const proto = h.get('x-forwarded-proto')?.split(',')[0]?.trim()
+  return proto === 'https'
+}
+
+/** Pose le cookie de session (httpOnly, lax, path=/, 8 h, Secure si HTTPS détecté). Valide uniquement dans un route handler. */
 export async function setSessionCookie(session: Session): Promise<void> {
   const store = await cookies()
   store.set({
@@ -115,7 +132,7 @@ export async function setSessionCookie(session: Session): Promise<void> {
     sameSite: 'lax',
     path: '/',
     maxAge: SESSION_TTL_SECONDS,
-    secure: process.env.NODE_ENV === 'production',
+    secure: await sessionCookieSecure(),
   })
 }
 

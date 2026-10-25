@@ -36,11 +36,18 @@ const MAX_BODY_BYTES = 1024 * 1024; // 1 MB
 const BODY_TIMEOUT_MS = 5000; // N.27 : lecture du corps plafonnée à 5 s
 const MAX_ROOMS_PER_SOCKET = 20; // K.4 : plafond de rooms par socket
 const SHUTDOWN_GRACE_MS = 3000; // N.24 : budget de finalisation à l'arrêt
+// i1 : plafond global de scans exécutés en parallèle (protection VPS — Docker,
+// outils réels et RAM ne sont pas extensibles à l'infini).
+const MAX_CONCURRENT_SCANS = Math.max(1, Number(process.env.MAX_CONCURRENT_SCANS) || 3);
+const TOOLS_STATUS_TTL_MS = 60_000; // i5 : cache du statut réel des outils (1 min)
 
 const TOOLS: Tool[] = ["PHANTOM", "DEEPAUDIT", "BASALT", "REDAMON"];
 const PROFILES: Profile[] = ["QUICK", "STANDARD", "DEEP"];
 const TARGET_TYPES: TargetType[] = ["URL", "GIT", "NETWORK"];
 const SCAN_ID_RE = /^[A-Za-z0-9_-]{6,64}$/;
+
+/** i5 : cache du dernier statut outils (payload complet + horodatage). */
+let toolsStatusCache: { at: number; payload: unknown } | null = null;
 
 /** Événements serveur → client (miroir des DTO de types.ts, contrat §G). */
 export interface ServerToClientEvents {
@@ -150,9 +157,42 @@ function requireInternalToken(req: IncomingMessage): boolean {
   return a.length === b.length && timingSafeEqual(a, b);
 }
 
+// M5 (audit 8-a) : le token de secours est public (dépôt GitHub). On avertit —
+// et on REFUSE de démarrer en production sans variable dédiée.
+if (!process.env.ENGINE_INTERNAL_TOKEN) {
+  if (process.env.NODE_ENV === "production") {
+    throw new Error("ENGINE_INTERNAL_TOKEN requis en production (token par défaut public)");
+  }
+  console.warn(
+    "[scan-engine] ENGINE_INTERNAL_TOKEN absent — token de développement public utilisé (non déployable)",
+  );
+}
+
 /** N.22 : retire les caractères de contrôle (\u0000-\u001F + \u007F) et les espaces d'extrémité. */
 function sanitizeTarget(raw: string): string {
   return raw.replace(/[\u0000-\u001F\u007F]/g, "").trim();
+}
+
+// C1 (audit 8-a) — défense en profondeur : les cibles sont passées comme
+// arguments uniques à des CLI exécutées SANS shell (git, phantom…). On impose
+// le schéma de chaque type : impossible d'injecter une option (« -… ») ou un
+// transport git alternatif (« ext:: », « fd:: »…).
+const ENGINE_URL_TARGET_RE = /^https?:\/\/[^\s]+$/i;
+const ENGINE_GIT_TARGET_RE = /^(https?:\/\/|ssh:\/\/|git@)[^\s]+$/i;
+const ENGINE_NETWORK_TARGET_RE = /^[a-zA-Z0-9._:[\]/-]+$/;
+
+function validateEngineTarget(targetType: TargetType, target: string): string | null {
+  if (target.startsWith("-")) return "target invalide (ne peut pas commencer par '-')";
+  if (targetType === "URL" && !ENGINE_URL_TARGET_RE.test(target)) {
+    return "target invalide pour une cible URL (format attendu : http(s)://hôte/chemin)";
+  }
+  if (targetType === "GIT" && !ENGINE_GIT_TARGET_RE.test(target)) {
+    return "target invalide pour une cible GIT (formats : https://…, ssh://…, git@hôte:chemin)";
+  }
+  if (targetType === "NETWORK" && !ENGINE_NETWORK_TARGET_RE.test(target)) {
+    return "target invalide pour une cible NETWORK (caractères autorisés : alphanumériques . : / [ ] -)";
+  }
+  return null;
 }
 
 /** Parse un en-tête Cookie ('a=b; c=d') — valeurs URL-décodées si possible. */
@@ -222,6 +262,20 @@ async function route(req: IncomingMessage, res: ServerResponse, engine: ScanEngi
         sendJson(res, 400, { ok: false, error: "target invalide (1 à 300 caractères)" });
         return;
       }
+      const targetError = validateEngineTarget(targetType as TargetType, target);
+      if (targetError) {
+        sendJson(res, 400, { ok: false, error: targetError });
+        return;
+      }
+
+      // i1 : plafond global de scans simultanés (protection des ressources VPS).
+      if (engine.runningCount() >= MAX_CONCURRENT_SCANS) {
+        sendJson(res, 409, {
+          ok: false,
+          error: `Trop de scans simultanés (limite ${MAX_CONCURRENT_SCANS}) — attendez la fin d'un scan en cours`,
+        });
+        return;
+      }
 
       // Le scan doit exister en base (404 AVANT le 202) ; campaignId lu en base.
       const scan = await db.scan.findUnique({ where: { id: scanId } });
@@ -276,10 +330,16 @@ async function route(req: IncomingMessage, res: ServerResponse, engine: ScanEngi
       return;
     }
 
-    // ── GET /internal/tools-status — disponibilité réelle par outil ──
+    // ── GET /internal/tools-status — disponibilité réelle par outil (cache 60 s, i5) ──
     if (path === "/internal/tools-status" && req.method === "GET") {
       if (!requireInternalToken(req)) {
         sendJson(res, 401, { ok: false, error: "unauthorized" });
+        return;
+      }
+      // i5 : la sonde spawn un `--version` par outil (latence ~secondes) — un
+      // cache TTL évite de rejouer les spawns à chaque ouverture de la vue Outils.
+      if (toolsStatusCache && Date.now() - toolsStatusCache.at < TOOLS_STATUS_TTL_MS) {
+        sendJson(res, 200, toolsStatusCache.payload);
         return;
       }
       const mode = currentExecMode();
@@ -303,7 +363,9 @@ async function route(req: IncomingMessage, res: ServerResponse, engine: ScanEngi
           void err;
         }
       }
-      sendJson(res, 200, { ok: true, mode, tools });
+      const payload = { ok: true, mode, tools };
+      toolsStatusCache = { at: Date.now(), payload };
+      sendJson(res, 200, payload);
       return;
     }
 
@@ -371,11 +433,19 @@ async function main(): Promise<void> {
     void route(req, res, engine);
   });
 
+  // m1 (audit 8-a) : CORS restreint au domaine du site si SITE_ORIGIN est fourni
+  // (déploiement Docker/VPS) ; sinon comportement réflexif par défaut (sandbox,
+  // same-origin via la gateway). Le handshake reste de toute façon authentifié.
+  const siteOrigin = process.env.SITE_ORIGIN;
   const io: Server<ClientToServerEvents, ServerToClientEvents> = new Server<
     ClientToServerEvents,
     ServerToClientEvents
   >(httpServer, {
-    cors: { origin: "*", methods: ["GET", "POST"] },
+    cors: {
+      origin: siteOrigin ? [siteOrigin] : true,
+      methods: ["GET", "POST"],
+      credentials: true,
+    },
     pingTimeout: 60000,
     pingInterval: 25000,
   });

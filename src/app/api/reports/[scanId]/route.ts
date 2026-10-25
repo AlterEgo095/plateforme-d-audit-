@@ -19,7 +19,8 @@ export const GET = withApi<{ scanId: string }>(async (_req, { params }) => {
   const { scanId } = await params
   const scan = await db.scan.findUnique({
     where: { id: scanId },
-    include: { campaign: true, findings: true },
+    // m10 (audit 8-a) : borné comme /api/scans/[id] — 2000 constats max.
+    include: { campaign: true, findings: { take: 2000, orderBy: { createdAt: 'desc' } } },
   })
   if (!scan) {
     return NextResponse.json({ error: 'Scan introuvable' }, { status: 404 })

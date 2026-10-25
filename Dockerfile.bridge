@@ -1,0 +1,24 @@
+# ── AuditForge — image du pont LLM (mini-services/llm-bridge, port 3031) ────
+# Service OPTIONNEL : expose /v1/chat/completions (protocole OpenAI) adossé à
+# Z.ai pour les outils réels, sans placer la clé dans les outils eux-mêmes.
+# Build :  docker build -f Dockerfile.bridge -t auditforge-llm-bridge .
+# Run    :  BIND_HOST=0.0.0.0 (réseau interne compose uniquement — le port
+#           n'est JAMAIS publié sur l'hôte ; passerelle : Caddy seulement).
+
+FROM oven/bun:1-slim AS runner
+WORKDIR /app
+
+ENV NODE_ENV=production
+
+# Dépendances du pont (z-ai-web-dev-sdk) — couche cachée tant que package.json
+# ne change pas.
+COPY mini-services/llm-bridge/package.json ./package.json
+RUN bun install --frozen-lockfile || bun install
+
+# Code source
+COPY mini-services/llm-bridge/src ./src
+
+# Le SDK Z.ai lit sa configuration (endpoint/clé) dans son environnement.
+EXPOSE 3031
+
+CMD ["bun", "src/index.ts"]

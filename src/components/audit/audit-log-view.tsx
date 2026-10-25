@@ -26,6 +26,23 @@ import {
 } from "@/components/audit/status-badges";
 import type { AuditEntry } from "@/lib/types";
 
+/**
+ * Libellés FR des codes d'action du journal (codes réellement écrits par
+ * les routes API et le seed — cf. src/lib/audit.ts, src/lib/seed.ts et les
+ * handlers src/app/api/**). Un code inconnu reste affiché brut.
+ */
+const ACTION_LABELS: Record<string, string> = {
+  LOGIN: "Connexion",
+  LOGOUT: "Déconnexion",
+  SEED: "Initialisation des données",
+  CAMPAIGN_CREATE: "Création de campagne",
+  CAMPAIGN_LAUNCH: "Lancement de campagne",
+  CAMPAIGN_DELETE: "Suppression de campagne",
+  SCAN_CANCEL: "Annulation de scan",
+  FINDING_STATUS_UPDATE: "Qualification de vulnérabilité",
+  REPORT_GENERATED: "Génération de rapport",
+};
+
 export function AuditLogView() {
   const { toast } = useToast();
   const [entries, setEntries] = useState<AuditEntry[]>([]);
@@ -113,7 +130,7 @@ export function AuditLogView() {
                     </TableCell>
                     <TableCell>
                       <Badge variant="outline" className="font-mono text-[10px]">
-                        {entry.action}
+                        {ACTION_LABELS[entry.action] ?? entry.action}
                       </Badge>
                     </TableCell>
                     <TableCell className="max-w-52 font-mono text-xs">

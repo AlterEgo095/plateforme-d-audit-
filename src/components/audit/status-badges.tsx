@@ -220,6 +220,11 @@ const TOOL_COLORS: Record<Tool, string> = {
   REDAMON: "#fbbf24",
 };
 
+// M4 (audit 8-a) : les cibles supportées dérivent de TOOL_TARGET_COMPAT
+// (src/lib/dto.ts) — SOURCE UNIQUE, aucun drift possible entre le formulaire
+// de campagne, les fiches outils et la validation serveur.
+import { TOOL_TARGET_COMPAT } from "@/lib/dto";
+
 /** Métadonnées centralisées des outils (contrat §B pour les cibles). */
 export const TOOL_META: Record<
   Tool,
@@ -234,25 +239,25 @@ export const TOOL_META: Record<
     label: "Phantom (IA)",
     color: TOOL_COLORS.PHANTOM,
     description: "Agent IA de pentest (boucle ReAct)",
-    supportedTargets: ["URL", "NETWORK"],
+    supportedTargets: TOOL_TARGET_COMPAT.PHANTOM,
   },
   DEEPAUDIT: {
     label: "DeepAudit",
     color: TOOL_COLORS.DEEPAUDIT,
     description: "Audit de code multi-agents",
-    supportedTargets: ["URL", "GIT"],
+    supportedTargets: TOOL_TARGET_COMPAT.DEEPAUDIT,
   },
   BASALT: {
     label: "Basalt",
     color: TOOL_COLORS.BASALT,
     description: "Vérification de PoC en sandbox",
-    supportedTargets: ["URL", "GIT"],
+    supportedTargets: TOOL_TARGET_COMPAT.BASALT,
   },
   REDAMON: {
     label: "Redamon",
     color: TOOL_COLORS.REDAMON,
     description: "Reconnaissance & exploitation",
-    supportedTargets: ["URL", "NETWORK"],
+    supportedTargets: TOOL_TARGET_COMPAT.REDAMON,
   },
 };
 
@@ -376,7 +381,7 @@ export function StatCard({
           {label}
         </div>
         {hint && (
-          <div className="text-muted-foreground/70 truncate text-[11px]">
+          <div className="text-muted-foreground/80 truncate text-[11px]">
             {hint}
           </div>
         )}

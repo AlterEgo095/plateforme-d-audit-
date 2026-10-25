@@ -17,10 +17,26 @@ export interface PreparedTarget {
   cloned: boolean;
 }
 
+// C1 (audit 8-a) — défense en profondeur : la validation applicative (Next.js)
+// peut être contournée par un appel direct au moteur ; on réimpose donc ICI le
+// schéma de la cible GIT. Sans cela, une cible `ext::sh -c …` ou débutant par
+// `--upload-pack=…` serait passée telle quelle à `git clone` → exécution de
+// commande arbitraire sur le conteneur moteur (qui monte docker.sock).
+const GIT_TARGET_RE = /^(https?:\/\/|ssh:\/\/|git@)[^\s]+$/i;
+
+export function assertSafeGitTarget(target: string): void {
+  if (target.startsWith("-") || !GIT_TARGET_RE.test(target)) {
+    throw new Error(
+      "Cible GIT refusée (formats acceptés : https://…, ssh://…, git@hôte:chemin — aucune option ni transport alternatif)",
+    );
+  }
+}
+
 export async function prepareTarget(ctx: RealAdapterContext): Promise<PreparedTarget> {
   if (ctx.targetType !== "GIT") {
     return { value: ctx.target, cloned: false };
   }
+  assertSafeGitTarget(ctx.target);
   const dest = join(ctx.workdir, "target-repo");
   await ctx.onLog(`git clone --depth 1 ${ctx.target} → ${dest}`, "CMD", "git");
   const result = await runStreaming({

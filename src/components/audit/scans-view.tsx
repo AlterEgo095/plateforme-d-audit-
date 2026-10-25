@@ -219,6 +219,7 @@ export function ScansView({
   const emptyResult = !loading && scans.length === 0;
 
   return (
+    <TooltipProvider delayDuration={200}>
     <div className="space-y-4">
       {/* Filtres */}
       <Card className="p-4">
@@ -379,7 +380,6 @@ export function ScansView({
                               : "—"}
                         </TableCell>
                         <TableCell className="text-right">
-                          <TooltipProvider delayDuration={200}>
                             <div className="flex items-center justify-end gap-1">
                               <Tooltip>
                                 <TooltipTrigger asChild>
@@ -439,7 +439,6 @@ export function ScansView({
                                 </Tooltip>
                               )}
                             </div>
-                          </TooltipProvider>
                         </TableCell>
                       </TableRow>
                     );
@@ -451,5 +450,6 @@ export function ScansView({
         </CardContent>
       </Card>
     </div>
+    </TooltipProvider>
   );
 }

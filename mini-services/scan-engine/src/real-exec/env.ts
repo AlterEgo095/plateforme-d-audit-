@@ -23,6 +23,17 @@ function parseMode(raw: string | undefined): ExecMode {
   return "simulation";
 }
 
+/**
+ * m5 (audit 8-a) : validation stricte du timeout — une valeur corrompue
+ * (NaN/négative) désactiverait le timeout de runStreaming → scan réel
+ * potentiellement infini. Borné à 24 h.
+ */
+function parseTimeoutMinutes(raw: string | undefined): number {
+  const n = Number(raw ?? "180");
+  if (!Number.isFinite(n) || n <= 0) return 180;
+  return Math.min(n, 24 * 60);
+}
+
 export const REAL_EXEC = {
   mode: parseMode(process.env.TOOL_EXECUTION_MODE),
 
@@ -38,8 +49,8 @@ export const REAL_EXEC = {
   /** Base URL OpenAI-compatible (pont llm-bridge ou Z.ai direct). */
   llmApiBase: process.env.LLM_API_BASE ?? "http://127.0.0.1:3031/v1",
 
-  /** Timeout global d'un scan réel (minutes) — au-delà : échec. */
-  timeoutMinutes: Number(process.env.REAL_SCAN_TIMEOUT_MIN ?? "180"),
+  /** Timeout global d'un scan réel (minutes) — au-delà : échec (défaut 180, borné). */
+  timeoutMinutes: parseTimeoutMinutes(process.env.REAL_SCAN_TIMEOUT_MIN),
 
   /** Durées estimées (ms) pour l'affichage de progression des scans réels. */
   estimatedMs: (tool: "PHANTOM" | "BASALT", profile: "QUICK" | "STANDARD" | "DEEP"): number => {

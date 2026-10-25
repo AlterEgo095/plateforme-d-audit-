@@ -8,6 +8,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { Loader2, Shield } from "lucide-react";
 import { apiGet, apiPost } from "@/lib/api-client";
+import { resetSocketState } from "@/hooks/use-socket";
 import { LoginScreen } from "@/components/audit/login-screen";
 import { AppShell, type View } from "@/components/audit/app-shell";
 import { DashboardView } from "@/components/audit/dashboard-view";
@@ -51,6 +52,9 @@ export default function Page() {
       setScanDetailId(null);
       setScanReportId(null);
       setCampaignFilter(null);
+      // Purge du socket (token caché + singleton) : la reconnexion après
+      // re-login repartira d'un token frais.
+      resetSocketState();
     };
     window.addEventListener("af:session-expired", onSessionExpired);
     return () =>
@@ -68,6 +72,8 @@ export default function Page() {
     setScanDetailId(null);
     setScanReportId(null);
     setCampaignFilter(null);
+    // Purge du socket (token caché + singleton) pour la prochaine session.
+    resetSocketState();
   }, []);
 
   const openScan = useCallback((scanId: string) => {
@@ -93,12 +99,7 @@ export default function Page() {
         aria-live="polite"
       >
         <div
-          className="flex size-14 items-center justify-center rounded-full border"
-          style={{
-            borderColor: "oklch(0.696 0.17 162.48 / 0.5)",
-            backgroundColor: "oklch(0.696 0.17 162.48 / 0.1)",
-            color: "#34d399",
-          }}
+          className="border-primary/50 bg-primary/10 text-primary flex size-14 items-center justify-center rounded-full border"
           aria-hidden
         >
           <Shield className="size-7 af-live-dot" />
@@ -116,6 +117,8 @@ export default function Page() {
     return (
       <LoginScreen
         onLogin={(u) => {
+          // Repart d'un socket sain (token frais) après une authentification.
+          resetSocketState();
           setUser(u);
           setView("dashboard");
         }}

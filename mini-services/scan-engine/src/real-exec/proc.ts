@@ -85,6 +85,41 @@ export interface RunStreamingResult {
 
 const MAX_LINE_LENGTH = 2000;
 
+/**
+ * m7 (audit 8-a) : environnement MINIMAL transmis aux CLI d'audit. Le processus
+ * moteur porte des secrets (AUTH_SECRET, ENGINE_INTERNAL_TOKEN, clés LLM) qui
+ * ne doivent PAS fuiter vers les outils — ni vers leurs conteneurs Docker.
+ * Allowlist système + variables outils ajoutées explicitement par les
+ * adaptateurs (paramètre `env` de RunStreamingOptions).
+ */
+const ALLOWED_ENV_KEYS = [
+  "PATH",
+  "HOME",
+  "TMPDIR",
+  "LANG",
+  "LC_ALL",
+  "TZ",
+  "TERM",
+  "DOCKER_HOST",
+  "HTTP_PROXY",
+  "HTTPS_PROXY",
+  "NO_PROXY",
+] as const;
+
+function sanitizedEnv(extra?: Record<string, string>): NodeJS.ProcessEnv {
+  // PYTHONUNBUFFERED : garantit des logs Python (Typer/rich) diffusés en temps réel.
+  // NODE_ENV : requis par les types Bun (ProcessEnv) — valeur bénigne pour les outils.
+  const env: NodeJS.ProcessEnv = {
+    PYTHONUNBUFFERED: "1",
+    NODE_ENV: process.env.NODE_ENV ?? "development",
+  };
+  for (const key of ALLOWED_ENV_KEYS) {
+    const value = process.env[key];
+    if (value !== undefined) env[key] = value;
+  }
+  return extra ? { ...env, ...extra } : env;
+}
+
 /** Découpe un buffer en lignes complètes ; retourne le reste. */
 class LineBuffer {
   private buf = "";
@@ -116,9 +151,12 @@ export async function runStreaming(opts: RunStreamingOptions): Promise<RunStream
     let timedOut = false;
     let aborted = false;
 
-    const child = spawn(resolved, opts.args, {
+    // Annotation explicite : l'intersection des surcharges de spawn avec
+    // stdio mixte se réduit à `never` sous tsc strict (sinon .stdout devient
+    // inaccessible). ChildProcess suffit — le code utilise `?.` partout.
+    const child: ChildProcess = spawn(resolved, opts.args, {
       cwd: opts.cwd,
-      env: { ...process.env, ...(opts.env ?? {}) },
+      env: sanitizedEnv(opts.env),
       stdio: ["ignore", "pipe", "pipe"],
       detached: true, // groupe de processus → kill arborescent
     });

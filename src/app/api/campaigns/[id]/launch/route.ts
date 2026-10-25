@@ -112,6 +112,17 @@ export const POST = withApi<{ id: string }>(async (req, { params }) => {
     const failedIds = scans
       .filter((_, i) => results[i].status === 'rejected')
       .map((s) => s.id)
+    // Motifs distincts des échecs (i1 — audit 8-a) : le message réel du moteur
+    // (ex. « Trop de scans simultanés ») remonte à l'utilisateur au lieu d'un
+    // générique « indisponible ».
+    const launchReasons = Array.from(
+      new Set(
+        results
+          .filter((r): r is PromiseRejectedResult => r.status === 'rejected')
+          .map((r) => (r.reason instanceof Error ? r.reason.message : String(r.reason)))
+      )
+    ).slice(0, 2)
+    const reasonSuffix = launchReasons.length > 0 ? ` — ${launchReasons.join(' ; ').slice(0, 300)}` : ''
     if (failedIds.length > 0) {
       await db.scan.updateMany({
         where: { id: { in: failedIds } },
@@ -121,9 +132,9 @@ export const POST = withApi<{ id: string }>(async (req, { params }) => {
     const allFailed = failedIds.length === scans.length
     if (allFailed) {
       await db.campaign.update({ where: { id }, data: { status: 'FAILED' } })
-      warning = "Moteur d'exécution indisponible — scans marqués en échec."
+      warning = `Lancement impossible — scans marqués en échec${reasonSuffix}`
     } else if (failedIds.length > 0) {
-      warning = "Moteur d'exécution indisponible pour certains scans."
+      warning = `Lancement impossible pour certains scans${reasonSuffix}`
     }
     await writeAudit(session.username, 'CAMPAIGN_LAUNCH', campaign.name, warning ?? tools.join(', '))
     return null

@@ -21,7 +21,7 @@ import {
 } from "lucide-react";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
-import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet";
+import { Sheet, SheetContent, SheetTitle, SheetDescription } from "@/components/ui/sheet";
 import { cn } from "@/lib/utils";
 import { useSocketConnection } from "@/hooks/use-socket";
 import { ROLE_LABELS } from "@/components/audit/status-badges";
@@ -93,12 +93,7 @@ function Logo() {
   return (
     <div className="flex items-center gap-2.5 px-2">
       <div
-        className="flex size-9 shrink-0 items-center justify-center rounded-lg border"
-        style={{
-          borderColor: "oklch(0.696 0.17 162.48 / 0.5)",
-          backgroundColor: "oklch(0.696 0.17 162.48 / 0.12)",
-          color: "#34d399",
-        }}
+        className="border-primary/50 bg-primary/10 text-primary flex size-9 shrink-0 items-center justify-center rounded-lg border"
         aria-hidden
       >
         <Shield className="size-5" />
@@ -232,7 +227,7 @@ export function AppShell({
         <Button
           variant="ghost"
           size="icon"
-          className="md:hidden"
+          className="size-11 md:hidden"
           aria-label="Ouvrir le menu de navigation"
           onClick={() => setMobileOpen(true)}
         >
@@ -249,7 +244,7 @@ export function AppShell({
           <Button
             variant="ghost"
             size="icon"
-            className="md:hidden"
+            className="size-11 md:hidden"
             aria-label="Déconnexion"
             onClick={onLogout}
           >
@@ -262,6 +257,9 @@ export function AppShell({
       <Sheet open={mobileOpen} onOpenChange={setMobileOpen}>
         <SheetContent side="left" className="bg-sidebar flex w-72 flex-col gap-0 p-0 sm:max-w-72">
           <SheetTitle className="sr-only">Menu de navigation</SheetTitle>
+          <SheetDescription className="sr-only">
+            Navigation entre les vues de la plateforme
+          </SheetDescription>
           <div className="flex h-16 shrink-0 items-center border-b px-4">
             <Logo />
           </div>

@@ -15,7 +15,7 @@
 | **Scans en temps réel** | Progression et phase en direct, **terminal de logs streaming** (socket.io), annulation en cours, durées et compteurs |
 | **Vulnérabilités** | Consolidation multi-outils, sévérité / confiance / CVSS / CVE, preuves et PoC, statut de qualification (Ouvert → Confirmé / Faux positif / Corrigé), recherche et filtres |
 | **Rapports** | Document d'audit formel généré par scan (synthèse exécutive, groupement par sévérité, remédiations), **export PDF via impression** |
-| **Sécurité de la plateforme** | RBAC 3 rôles, sessions signées HMAC-SHA256 (cookie httpOnly), **MFA (TOTP)**, rate limiting sur la connexion, journal d'audit immuable |
+| **Sécurité de la plateforme** | RBAC 3 rôles, sessions signées HMAC-SHA256 (cookie httpOnly), **MFA** (code de démo statique sur les comptes de démo uniquement), rate limiting sur la connexion, en-têtes de sécurité HTTP (CSP…), journal d'audit immuable |
 | **Multi-outils** | 4 moteurs intégrés avec phases, logs et constats propres à chaque outil ; sentinelles de vérification (PoC exécuté en sandbox sans réseau) |
 
 ---
@@ -52,7 +52,7 @@ En **déploiement Docker**, un reverse proxy **Caddy** est le seul point d'entr�
 |---|---|---|---|
 | **Phantom** | URL, Réseau | Agent IA offensif : reconnaissance, énumération, exploitation | ✅ adaptateur natif (agent ReAct authentique) |
 | **DeepAudit** | URL, Git | Audit de code multi-agents (Recon → Analyse → Vérification) | 🔜 via sa plateforme dédiée (VPS) |
-| **Basalt** | URL, Git | Scanner ciblé avec **sentinelle `BASALT-POC-TRIGGERED`** | ✅ adaptateur natif (PoC exécuté réellement) |
+| **Basalt** | Git | Scanner ciblé avec **sentinelle `BASALT-POC-TRIGGERED`** | ✅ adaptateur natif (PoC exécuté réellement) |
 | **RedAmon** | URL, Réseau | Reconnaissance et exploitation d'infrastructure (ports, sous-domaines, fingerprint) | 🔜 via sa plateforme dédiée (VPS) |
 
 > En mode `simulation` (ou lorsqu'un outil réel est indisponible), chaque outil est reproduit par un pipeline réaliste : phases pondérées, logs crédibles, constats structurés, sentinelles PoC — sans toucher aucune cible.
@@ -134,13 +134,21 @@ bun run dev
 
 ### Comptes de démonstration
 
+> ⚠️ **Comptes créés uniquement en mode DÉMONSTRATION** (développement local, ou
+> `DEMO_SEED=1` explicite). En production, **aucun compte public n'est créé** :
+> définissez `ADMIN_USERNAME` / `ADMIN_PASSWORD` dans le `.env` pour créer le
+> premier administrateur au premier démarrage, puis créez les autres comptes
+> depuis l'interface.
+
 | Identifiant | Mot de passe | Rôle | Notes |
 |---|---|---|---|
-| `admin` | `Admin123!` | **ADMIN** | MFA activée — code TOTP de démo : `123456` |
+| `admin` | `Admin123!` | **ADMIN** | MFA activée — code de démo STATIQUE : `123456` |
 | `auditeur` | `Audit123!` | **AUDITOR** | Création / lancement / annulation / qualification |
 | `observateur` | `View123!` | **VIEWER** | Lecture seule |
 
-> 🔐 **En production** : supprimez ces comptes de démonstration (ou changez leurs identifiants/mots de passe), désactivez le TOTP de démo et définissez vos propres `AUTH_SECRET` / `ENGINE_INTERNAL_TOKEN`.
+> 🔐 Le « TOTP » des comptes de démo est un code fixe (`123456`) — suffisant
+> pour la démonstration, à ne JAMAIS activer en production. Le compte d'amorçage
+> (`ADMIN_USERNAME`/`ADMIN_PASSWORD`) est créé **sans** MFA.
 
 ### Permissions par rôle
 
@@ -173,7 +181,8 @@ docker compose up -d --build
 
 - Interface : `http://<IP-du-VPS>` (HTTP par défaut) — avec `SITE_DOMAIN=audit.exemple.com` dans le `.env`, **HTTPS est obtenu automatiquement** (certificats Let's Encrypt gérés par Caddy).
 - La base SQLite est persistée dans le volume Docker `auditforge-data` (mode WAL, partagée entre `app` et `engine`).
-- Le schéma de base est appliqué automatiquement au démarrage du conteneur `app`, et les comptes de démonstration sont créés au premier accès.
+- Le schéma de base est appliqué automatiquement au démarrage du conteneur `app`.
+- **Aucun compte n'est créé par défaut en production** : renseignez `ADMIN_USERNAME` / `ADMIN_PASSWORD` (amorçage) ou `DEMO_SEED=1` (démo only, identifiants publics).
 
 ### Variables d'environnement (docker-compose)
 
@@ -190,13 +199,20 @@ docker compose up -d --build
 | `LLM_API_BASE` (engine) | Endpoint OpenAI-compatible des outils réels (Z.ai direct ou pont) | `https://api.z.ai/api/paas/v4` |
 | `LLM_API_KEY` (engine) | Clé API LLM (Z.ai) pour les outils réels | — |
 | `PHANTOM_LLM` / `BASALT_MODEL` | Modèle par outil (format LiteLLM / nom de modèle) | `openai/glm-4.6` / `glm-4.6` |
+| `DEMO_SEED` (app) | `1` = créer les comptes de démo (identifiants publics) | `0` en production |
+| `ADMIN_USERNAME` / `ADMIN_PASSWORD` (app) | Premier compte ADMIN créé au premier démarrage (amorçage) | — |
+| `MAX_CONCURRENT_SCANS` (engine) | Plafond global de scans simultanés (protection VPS) | `3` |
+| `SITE_ORIGIN` (engine) | Origine autorisée pour les handshakes socket.io (CORS) | réflexif |
 
 ---
 
 ## 🔐 Sécurité implémentée
 
-- **Authentification** : mots de passe hachés **scrypt** (salt aléatoire, comparaison à temps constant), sessions `v1.<payload>.<signature>` HMAC-SHA256, cookie `httpOnly` + `SameSite=Lax` (+ `Secure` en production), expiration 8 h.
-- **MFA (TOTP)** pour les comptes à privilèges (réponse `428 mfaRequired` puis vérification du code).
+- **Authentification** : mots de passe hachés **scrypt** (salt aléatoire, comparaison à temps constant), sessions `v1.<payload>.<signature>` HMAC-SHA256, cookie `httpOnly` + `SameSite=Lax` (+ `Secure` automatique dès que le site est servi en HTTPS — détection `X-Forwarded-Proto`, override `COOKIE_SECURE`), expiration 8 h.
+- **MFA** sur le compte de démo admin (code statique `123456` — démonstration uniquement ; les comptes d'amorçage production sont créés sans MFA).
+- **En-têtes de sécurité HTTP** : CSP, `X-Frame-Options: DENY`, `nosniff`, `Referrer-Policy`, `Permissions-Policy`, HSTS (appliquée automatiquement en HTTPS) — posés sur toutes les routes par `next.config.ts`.
+- **Validation stricte des cibles** : schéma par type (URL `http(s)://…`, GIT `https://|ssh://|git@…`, NETWORK alphanumérique) — empêche l'injection d'options/transport (`ext::`, `-upload-pack`…) dans les CLI du moteur, vérifiée côté app ET côté moteur (défense en profondeur).
+- **Environnement minimal des outils réels** : les CLI d'audit (et leurs conteneurs) reçoivent une allowlist de variables — jamais `AUTH_SECRET`, `ENGINE_INTERNAL_TOKEN` ni les clés LLM inutiles.
 - **Rate limiting** de la connexion : 5 échecs / 10 min par IP + identifiant (fenêtre glissante), avec réinitialisation au succès.
 - **RBAC** serveur sur **tous** les endpoints (VIEWER / AUDITOR / ADMIN) + validations d'entrée **Zod** systématiques.
 - **Token interne** `x-internal-token` exigé par chaque route `/internal/*` du moteur (les API d'orchestration ne sont pas exposées publiquement).
@@ -253,6 +269,7 @@ Authentification par cookie de session (`af_session`). Erreurs uniformes `{ "err
 ├── docker-compose.yml          # Pile complète (app + engine + Caddy)
 ├── Dockerfile                  # Image application Next.js (standalone)
 ├── Dockerfile.engine           # Image moteur + outils réels (Phantom, Basalt)
+├── Dockerfile.bridge           # Image pont LLM optionnel (mini-services/llm-bridge)
 ├── Caddyfile.docker            # Reverse proxy (HTTPS automatique)
 ├── prisma/schema.prisma        # Modèle de données (SQLite)
 ├── src/

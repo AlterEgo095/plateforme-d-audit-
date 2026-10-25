@@ -32,6 +32,9 @@ model Campaign {
   createdBy   User     @relation(fields: [createdById], references: [id])
   createdAt   DateTime @default(now())
   scans       Scan[]
+
+  @@index([createdById])
+  @@index([createdAt])
 }
 
 model Scan {
@@ -51,6 +54,12 @@ model Scan {
   createdAt     DateTime  @default(now())
   findings      Finding[]
   logs          ScanLog[]
+
+  // m8 (audit 8-a) : index sur les FK et colonnes de filtrage/trie réelles —
+  // ScanLog et Finding croissent sans borne, les requêtes filtrent par scanId.
+  @@index([campaignId])
+  @@index([status])
+  @@index([createdAt])
 }
 
 model Finding {
@@ -72,6 +81,9 @@ model Finding {
   status            String   @default("OPEN") // OPEN | CONFIRMED | FALSE_POSITIVE | FIXED
   remediation       String?
   createdAt         DateTime @default(now())
+
+  @@index([scanId])
+  @@index([status])
 }
 
 model ScanLog {
@@ -82,6 +94,9 @@ model ScanLog {
   level   String // INFO | CMD | WARN | ERROR | SUCCESS | TOOL | AGENT
   source  String
   message String
+
+  @@index([scanId])
+  @@index([ts])
 }
 
 model AuditTrail {
@@ -91,4 +106,6 @@ model AuditTrail {
   resource  String
   detail    String?
   createdAt DateTime @default(now())
+
+  @@index([createdAt])
 }

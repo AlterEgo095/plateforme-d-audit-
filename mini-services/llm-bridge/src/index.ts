@@ -18,6 +18,7 @@
  */
 
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { timingSafeEqual } from "node:crypto";
 
 const PORT = 3031;
 const BRIDGE_KEY = process.env.LLM_BRIDGE_KEY ?? "";
@@ -28,17 +29,29 @@ const EXPOSED_MODELS = (process.env.LLM_BRIDGE_MODELS ?? "glm-4.6,glm-4.5-air,gl
   .filter(Boolean);
 
 // ── SDK Z.ai (instance unique, réutilisée entre les requêtes) ────────────────
+type ZAICompletion = {
+  choices?: Array<{ message?: { content?: unknown }; finish_reason?: string | null }>;
+  content?: unknown;
+  usage?: unknown;
+};
 type ZAIClient = {
-  chat: { completions: { create: (body: Record<string, unknown>) => Promise<any> } };
+  chat: { completions: { create: (body: Record<string, unknown>) => Promise<ZAICompletion> } };
 };
 let zaiPromise: Promise<ZAIClient> | null = null;
 
 async function getZai(): Promise<ZAIClient> {
   if (!zaiPromise) {
-    zaiPromise = import("z-ai-web-dev-sdk").then((mod) => {
-      const ZAI = (mod as any).default ?? mod;
-      return ZAI.create() as Promise<ZAIClient>;
-    });
+    zaiPromise = import("z-ai-web-dev-sdk")
+      .then((mod) => {
+        const ZAI = (mod as { default?: unknown }).default ?? mod;
+        return (ZAI as { create: () => Promise<ZAIClient> }).create();
+      })
+      .catch((err: unknown) => {
+        // m4 (audit 8-a) : ne PAS mettre en cache le rejet — sinon le pont
+        // reste brické jusqu'au redémarrage après une seule erreur SDK.
+        zaiPromise = null;
+        throw err;
+      });
   }
   return zaiPromise;
 }
@@ -73,8 +86,12 @@ function readBody(req: IncomingMessage, maxBytes = 8 * 1024 * 1024): Promise<str
 
 function authorized(req: IncomingMessage): boolean {
   if (!BRIDGE_KEY) return true;
+  // m4 (audit 8-a) : comparaison à temps constant (anti timing-attack).
   const header = req.headers.authorization ?? "";
-  return header === `Bearer ${BRIDGE_KEY}`;
+  const expected = `Bearer ${BRIDGE_KEY}`;
+  const a = Buffer.from(header);
+  const b = Buffer.from(expected);
+  return a.length === b.length && timingSafeEqual(a, b);
 }
 
 // ── Mapping OpenAI → SDK → OpenAI ────────────────────────────────────────────
@@ -216,9 +233,9 @@ async function handleChatCompletions(req: IncomingMessage, res: ServerResponse):
 
   try {
     const zai = await getZai();
-    const completion = (await zai.chat.completions.create(payload)) as any;
-    const content: string =
-      completion?.choices?.[0]?.message?.content ?? completion?.content ?? "";
+    const completion = await zai.chat.completions.create(payload);
+    const rawContent = completion?.choices?.[0]?.message?.content ?? completion?.content;
+    const content: string = typeof rawContent === "string" ? rawContent : "";
     if (wantsStream) {
       writeEmulatedStream(res, requestedModel, content);
     } else {
@@ -269,6 +286,9 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
 }
 
 // ── Serveur (bouclage uniquement, comme le moteur — jamais publié sur l'hôte) ─
+// m3 (audit 8-a) : BIND_HOST permet le déploiement Docker (0.0.0.0 — réseau
+// interne compose uniquement, jamais de port publié sur l'hôte).
+const BIND_HOST = process.env.BIND_HOST ?? "127.0.0.1";
 const server = createServer((req, res) => {
   route(req, res).catch((err) => {
     console.error("[llm-bridge] erreur route:", err);
@@ -276,8 +296,8 @@ const server = createServer((req, res) => {
   });
 });
 
-server.listen(PORT, "127.0.0.1", () => {
-  console.log(`[llm-bridge] écoute sur 127.0.0.1:${PORT} (modèle par défaut: ${DEFAULT_MODEL})`);
+server.listen(PORT, BIND_HOST, () => {
+  console.log(`[llm-bridge] écoute sur ${BIND_HOST}:${PORT} (modèle par défaut: ${DEFAULT_MODEL})`);
   if (!BRIDGE_KEY) {
     console.warn("[llm-bridge] LLM_BRIDGE_KEY absent — endpoint sans authentification (réseau interne uniquement)");
   }

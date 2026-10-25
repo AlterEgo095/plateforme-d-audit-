@@ -47,16 +47,60 @@ export const SEVERITY_RANK: Record<Severity, number> = {
   INFO: 0,
 }
 
-/** Compatibilité outils ⇄ types de cible (worklog §B). */
+/**
+ * Compatibilité outils ⇄ types de cible (worklog §B).
+ * M4 (audit 8-a) : BASALT en mode RÉEL n'accepte qu'un chemin/dépôt GIT
+ * (`basalt audit <chemin>`) — une cible URL produisait un échec systématique
+ * sans repli. La compatibilité est alignée sur l'adaptateur réel.
+ */
 export const TOOL_TARGET_COMPAT: Record<Tool, TargetType[]> = {
   PHANTOM: ['URL', 'NETWORK'],
   REDAMON: ['URL', 'NETWORK'],
   DEEPAUDIT: ['URL', 'GIT'],
-  BASALT: ['URL', 'GIT'],
+  BASALT: ['GIT'],
 }
 
 export function isToolCompatible(tool: Tool, targetType: TargetType): boolean {
   return TOOL_TARGET_COMPAT[tool]?.includes(targetType) ?? false
+}
+
+// ─── Validation des cibles (C1 — audit 8-a) ──────────────────────────
+//
+// Les cibles sont transmises comme arguments uniques à des CLI exécutées SANS
+// shell (git clone, phantom scan, basalt audit…). Sans schéma strict, un
+// AUDITOR peut injecter des options CLI (cible débutant par « - ») ou un
+// transport git arbitraire (« ext::sh -c … » → exécution de commande sur le
+// conteneur moteur). Chaque type impose son format : tout le reste est refusé.
+
+const URL_TARGET_RE = /^https?:\/\/[^\s]+$/i
+const GIT_TARGET_RE = /^(https?:\/\/|ssh:\/\/|git@)[^\s]+$/i
+const NETWORK_TARGET_RE = /^[a-zA-Z0-9._:[\]/-]+$/
+
+/**
+ * Valide une cible selon son type. Retourne un message d'erreur FR, ou null si
+ * la cible est acceptée.
+ */
+export function validateTarget(targetType: TargetType, target: string): string | null {
+  const t = target.trim()
+  if (t.length === 0 || t.length > 300) {
+    return 'La cible doit contenir entre 1 et 300 caractères'
+  }
+  if (/[\s\u0000-\u001f\u007f]/.test(t)) {
+    return 'La cible ne doit contenir ni espace ni caractère de contrôle'
+  }
+  if (t.startsWith('-')) {
+    return 'La cible ne peut pas commencer par « - »'
+  }
+  if (targetType === 'URL' && !URL_TARGET_RE.test(t)) {
+    return 'Cible URL invalide — format attendu : http(s)://hôte/chemin'
+  }
+  if (targetType === 'GIT' && !GIT_TARGET_RE.test(t)) {
+    return 'Cible GIT invalide — formats acceptés : https://…, ssh://…, git@hôte:chemin'
+  }
+  if (targetType === 'NETWORK' && !NETWORK_TARGET_RE.test(t)) {
+    return 'Cible réseau invalide — caractères autorisés : alphanumériques, . : / [ ] -'
+  }
+  return null
 }
 
 /**
@@ -171,8 +215,19 @@ interface CampaignLike extends Campaign {
   scans?: Scan[]
 }
 
+/**
+ * Compteurs globaux optionnels (m9 — audit 8-a) : quand la liste `scans` est
+ * tronquée (take 50) les sommes JS sous-estiment les totaux réels. La route
+ * fournit alors scansCount (via _count) et les sommes exactes (via groupBy).
+ */
+interface CampaignTotals {
+  scansCount?: number
+  findingsCount?: number
+  criticalCount?: number
+}
+
 /** Mappe une campagne (scans triés asc, comptages agrégés, createdByName). */
-export function toCampaignDTO(c: CampaignLike): CampaignDTO {
+export function toCampaignDTO(c: CampaignLike, totals?: CampaignTotals): CampaignDTO {
   const scans = [...(c.scans ?? [])].sort(
     (a, b) => a.createdAt.getTime() - b.createdAt.getTime()
   )
@@ -188,7 +243,8 @@ export function toCampaignDTO(c: CampaignLike): CampaignDTO {
     createdById: c.createdById,
     createdByName: c.createdBy?.username ?? 'inconnu',
     scans: scans.map((s) => toScanDTO(s)),
-    findingsCount: scans.reduce((acc, s) => acc + s.findingsCount, 0),
-    criticalCount: scans.reduce((acc, s) => acc + s.criticalCount, 0),
+    scansCount: totals?.scansCount ?? scans.length,
+    findingsCount: totals?.findingsCount ?? scans.reduce((acc, s) => acc + s.findingsCount, 0),
+    criticalCount: totals?.criticalCount ?? scans.reduce((acc, s) => acc + s.criticalCount, 0),
   }
 }

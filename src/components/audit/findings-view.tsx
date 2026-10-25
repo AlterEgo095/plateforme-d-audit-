@@ -42,7 +42,6 @@ import {
 import { FindingDetail } from "@/components/audit/finding-detail";
 import type {
   FindingDTO,
-  FindingStatus,
   Tool,
   UserDTO,
 } from "@/lib/types";
@@ -303,7 +302,7 @@ export function FindingsView({ user }: { user: UserDTO }) {
                         {f.sentinelTriggered ? <SentinelBadge /> : <span>—</span>}
                       </TableCell>
                       <TableCell className="hidden sm:table-cell">
-                        <FindingStatusBadge status={f.status as FindingStatus} />
+                        <FindingStatusBadge status={f.status} />
                       </TableCell>
                     </TableRow>
                   ))}

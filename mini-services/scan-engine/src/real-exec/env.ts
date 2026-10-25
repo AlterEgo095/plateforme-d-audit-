@@ -3,16 +3,19 @@
  *
  * TOOL_EXECUTION_MODE :
  *   - "simulation" (défaut) : pipelines simulés uniquement (aucune cible touchée) ;
- *   - "auto" : exécution réelle SI l'outil est disponible (binaire + Docker),
- *     sinon bascule explicite en simulation (ligne de journal dédiée) ;
+ *   - "auto" : exécution réelle SI l'outil est disponible (binaire + Docker ou
+ *     plateforme distante joignable), sinon bascule explicite en simulation
+ *     (ligne de journal dédiée) ;
  *   - "real" : exécution réelle stricte — scan marqué FAILED si l'outil
  *     réel est indisponible.
  *
- * Les outils réels (Phantom, Basalt) ont besoin :
- *   - du binaire installé (pip install phantom-agent / pipx install basalt-scan) ;
- *   - de Docker (sandbox Kali Phantom, sandbox sans réseau Basalt) ;
- *   - d'un accès LLM (pont Z.ai llm-bridge ou endpoint OpenAI-compatible direct).
+ * Deux familles d'outils réels :
+ *   - CLI locales (Phantom, Basalt) : binaire pip + Docker (sandboxes) ;
+ *   - plateformes distantes (DeepAudit, RedAmon) : API REST — les variables
+ *     *_API_URL / *_EMAIL / *_PASSWORD pointent vers leurs instances.
  */
+
+import type { Profile, Tool } from "../types";
 
 export type ExecMode = "simulation" | "auto" | "real";
 
@@ -42,6 +45,16 @@ export const REAL_EXEC = {
   /** Binaire Basalt (basalt-scan, CLI `basalt`). */
   basaltBin: process.env.BASALT_BIN ?? "basalt",
 
+  /** Plateforme DeepAudit — base API (ex. http://deepaudit-backend:8000). */
+  deepauditUrl: (process.env.DEEPAUDIT_API_URL ?? "").trim(),
+  deepauditEmail: (process.env.DEEPAUDIT_EMAIL ?? "").trim(),
+  deepauditPassword: process.env.DEEPAUDIT_PASSWORD ?? "",
+
+  /** Plateforme RedAmon — base webapp (ex. http://redamon-webapp:3000). */
+  redamonUrl: (process.env.REDAMON_API_URL ?? "").trim(),
+  redamonEmail: (process.env.REDAMON_EMAIL ?? "").trim(),
+  redamonPassword: process.env.REDAMON_PASSWORD ?? "",
+
   /** Modèle LiteLLM transmis à Phantom (format provider/model). */
   phantomLlm: process.env.PHANTOM_LLM ?? "openai/glm-4.6",
   /** Clé API LLM transmise aux outils. */
@@ -53,12 +66,14 @@ export const REAL_EXEC = {
   timeoutMinutes: parseTimeoutMinutes(process.env.REAL_SCAN_TIMEOUT_MIN),
 
   /** Durées estimées (ms) pour l'affichage de progression des scans réels. */
-  estimatedMs: (tool: "PHANTOM" | "BASALT", profile: "QUICK" | "STANDARD" | "DEEP"): number => {
+  estimatedMs: (tool: Tool, profile: Profile): number => {
     const baseMinutes =
       (
         {
           PHANTOM: { QUICK: 15, STANDARD: 45, DEEP: 120 } as Record<string, number>,
           BASALT: { QUICK: 8, STANDARD: 20, DEEP: 45 } as Record<string, number>,
+          DEEPAUDIT: { QUICK: 20, STANDARD: 45, DEEP: 120 } as Record<string, number>,
+          REDAMON: { QUICK: 25, STANDARD: 60, DEEP: 150 } as Record<string, number>,
         } as Record<string, Record<string, number>>
       )[tool] ?? { QUICK: 20, STANDARD: 45, DEEP: 90 };
     return (baseMinutes[profile] ?? 45) * 60_000;

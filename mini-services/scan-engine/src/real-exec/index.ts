@@ -1,21 +1,30 @@
 /**
  * AuditForge — Registre des adaptateurs d'exécution réelle.
  *
- * Adaptateurs réels livrés : PHANTOM (CLI phantom-agent), BASALT (CLI
- * basalt-scan). DEEPAUDIT et REDAMON restent en simulation tant que leurs
- * plateformes Docker respectives ne sont pas déployées à côté du moteur
- * (procédure documentée dans le README — section « Exécution réelle »).
+ * Les 4 outils disposent d'un adaptateur réel :
+ *   - PHANTOM (CLI phantom-agent + sandbox Docker Kali) ;
+ *   - BASALT (CLI basalt-scan + sandbox Docker PoC) ;
+ *   - DEEPAUDIT (plateforme distante pilotée par API REST) ;
+ *   - REDAMON (plateforme distante pilotée par API REST).
+ * Les plateformes doivent être déployées à côté du moteur et déclarées via
+ * les variables DEEPAUDIT_API_URL / REDAMON_API_URL (voir README — section
+ * « Exécution réelle »). Sans configuration, l'indisponibilité est signalée
+ * honnêtement (tools-status + bascule simulation en mode auto).
  */
 
 import { BasaltAdapter } from "./basalt";
+import { DeepAuditAdapter } from "./deepaudit";
 import { execMode, type ExecMode } from "./env";
 import { PhantomAdapter } from "./phantom";
+import { RedAmonAdapter } from "./redamon";
 import type { RealToolAdapter } from "./types";
 import type { Tool } from "../types";
 
 const ADAPTERS: Partial<Record<Tool, () => RealToolAdapter>> = {
   PHANTOM: () => new PhantomAdapter(),
   BASALT: () => new BasaltAdapter(),
+  DEEPAUDIT: () => new DeepAuditAdapter(),
+  REDAMON: () => new RedAmonAdapter(),
 };
 
 /** Retourne l'adaptateur réel de l'outil, ou null si non implémenté. */

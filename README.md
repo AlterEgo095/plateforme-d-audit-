@@ -51,9 +51,9 @@ En **déploiement Docker**, un reverse proxy **Caddy** est le seul point d'entr�
 | Outil | Cibles supportées | Spécialité | Exécution réelle |
 |---|---|---|---|
 | **Phantom** | URL, Réseau | Agent IA offensif : reconnaissance, énumération, exploitation | ✅ adaptateur natif (agent ReAct authentique) |
-| **DeepAudit** | URL, Git | Audit de code multi-agents (Recon → Analyse → Vérification) | 🔜 via sa plateforme dédiée (VPS) |
+| **DeepAudit** | Git | Audit de code multi-agents (Recon → Analyse → Vérification) | ✅ adaptateur API (plateforme distante) |
 | **Basalt** | Git | Scanner ciblé avec **sentinelle `BASALT-POC-TRIGGERED`** | ✅ adaptateur natif (PoC exécuté réellement) |
-| **RedAmon** | URL, Réseau | Reconnaissance et exploitation d'infrastructure (ports, sous-domaines, fingerprint) | 🔜 via sa plateforme dédiée (VPS) |
+| **RedAmon** | URL, Réseau | Reconnaissance et exploitation d'infrastructure (ports, sous-domaines, fingerprint) | ✅ adaptateur API (plateforme distante) |
 
 > En mode `simulation` (ou lorsqu'un outil réel est indisponible), chaque outil est reproduit par un pipeline réaliste : phases pondérées, logs crédibles, constats structurés, sentinelles PoC — sans toucher aucune cible.
 
@@ -75,8 +75,8 @@ Le moteur d'exécution (`scan-engine`) fonctionne selon **deux modes**, contrôl
 |---|---|---|
 | **Phantom** | ✅ natif — CLI `phantom scan -t <cible> -m quick\|standard\|deep --non-interactive --json` (agent ReAct authentique, sandbox Kali éphémère) | Requiert `pip install phantom-agent` + Docker + LLM |
 | **Basalt** | ✅ natif — CLI `basalt audit <dépôt> --format json` (constats confirmés **uniquement si le PoC s'exécute** — sentinelle `BASALT-POC-TRIGGERED` réelle) | Requiert `pipx install basalt-scan` + Docker + LLM |
-| **DeepAudit** | 🔜 plateforme dédiée — déployer sa stack (`docker compose` du dépôt) puis brancher son API REST (procédure dans `docs/`) | Simulation en attendant |
-| **RedAmon** | 🔜 plateforme dédiée — déployer sa stack (`docker compose` du dépôt) puis brancher son API/MCP | Simulation en attendant |
+| **DeepAudit** | ✅ API — `POST /api/v1/projects` (dépôt Git cloné par la plateforme) → `agent-tasks` → polling progression → constats normalisés ; niveau de vérification selon profil (`analysis_only` / `sandbox` / `generate_poc`) | Requiert la plateforme DeepAudit déployée + `DEEPAUDIT_API_URL` / `DEEPAUDIT_EMAIL` / `DEEPAUDIT_PASSWORD` |
+| **RedAmon** | ✅ API — `POST /api/projects` (cible URL→hôte ou IP/CIDR, modules selon profil) → `recon/{id}/start` → polling phases + journal SSE → graphe Neo4j (vulnérabilités nuclei/GVM/…) | Requiert la plateforme RedAmon déployée + `REDAMON_API_URL` / `REDAMON_EMAIL` / `REDAMON_PASSWORD` |
 
 Le badge de chaque outil (vue **Outils**) indique le mode effectif et la raison d'une éventuelle indisponibilité (`GET /api/tools` → `realAvailable`, `realReason`).
 
@@ -95,12 +95,39 @@ BASALT_MODEL=glm-4.6
 
 Un **pont LLM** (`mini-services/llm-bridge/`, port 3031) est également fourni : il expose un endpoint `/v1/chat/completions` standard adossé au SDK Z.ai — pratique pour le développement local ou pour centraliser la clé. En production, pointer directement vers `https://api.z.ai/api/paas/v4` est plus simple.
 
+### Plateformes distantes : DeepAudit et RedAmon
+
+Ces deux outils sont des **plateformes complètes** : ils se déploient eux-mêmes (leur propre `docker compose`, leurs propres bases de données) et le moteur AuditForge les pilote par API REST. Les adaptateurs sont **déjà intégrés** — il reste à déployer chaque plateforme à côté du moteur puis à déclarer sa connexion dans l'environnement du moteur :
+
+```bash
+# ── DeepAudit (audit de code multi-agents) ─────────────────────────
+git clone https://github.com/lintsinghua/DeepAudit.git && cd DeepAudit
+cp backend/.env.example backend/.env        # configurer Postgres + LLM
+# LLM : LLM_PROVIDER=openai + LLM_API_KEY=… + LLM_BASE_URL=https://api.z.ai/api/paas/v4
+docker compose -f docker-compose.prod.yml up -d     # backend :8000
+# créer un compte (POST /api/v1/auth/register ou interface), puis côté AuditForge :
+#   DEEPAUDIT_API_URL=http://<hôte-deepaudit>:8000
+#   DEEPAUDIT_EMAIL=… / DEEPAUDIT_PASSWORD=…
+
+# ── RedAmon (reconnaissance offensive en conteneurs) ───────────────
+git clone https://github.com/samugit83/redamon.git && cd redamon
+./redamon.sh install                        # ≥ 8 Go RAM recommandés ; webapp :3000
+# créer un compte via l'interface, puis côté AuditForge :
+#   REDAMON_API_URL=http://<hôte-redamon>:3000
+#   REDAMON_EMAIL=… / REDAMON_PASSWORD=…
+```
+
+Notes :
+- **DeepAudit** audite du **code** : seules les cibles **GIT** lui sont proposées (la plateforme clone le dépôt elle-même). Son LLM se configure dans son propre `.env` (endpoint OpenAI-compatible — Z.ai fonctionne).
+- **RedAmon** accepte les cibles **URL** (l'hôte est dérivé) et **Réseau** (IP ou CIDR — plafonné `/24` IPv4, `/104` IPv6 par la plateforme). Son LLM (phases IA optionnelles) se configure dans son interface web.
+- Chaque plateforme doit être **joignable depuis le conteneur/serveur du moteur** (même réseau Docker ou hôte accessible) — sans quoi le badge indique « inaccessible » et le mode `auto` bascule en simulation.
+
 ### Prérequis de l'exécution réelle
 
 1. **Docker** accessible par le moteur (en Docker Compose : montage `/var/run/docker.sock` déjà prévu) ;
 2. **Binaires installés** : `pip install phantom-agent` et `pipx install basalt-scan` (l'image `Dockerfile.engine` les installe automatiquement) ;
 3. **Premier scan Phantom** : l'image sandbox Kali (~13 Go) est téléchargée une seule fois ;
-4. **Cibles autorisées** : Phantom accepte les cibles URL ; Basalt et DeepAudit auditent du code (cibles GIT, clonées automatiquement par le moteur) ;
+4. **Cibles autorisées** : Phantom et RedAmon acceptent les cibles URL et réseau ; Basalt et DeepAudit auditent du code (cibles GIT — clonée par le moteur pour Basalt, par la plateforme pour DeepAudit) ;
 5. Les constats réels alimentent exactement le même pipeline que la simulation : temps réel socket.io, vulnérabilités, qualification, rapports PDF, journal d'audit.
 
 ---
@@ -199,6 +226,8 @@ docker compose up -d --build
 | `LLM_API_BASE` (engine) | Endpoint OpenAI-compatible des outils réels (Z.ai direct ou pont) | `https://api.z.ai/api/paas/v4` |
 | `LLM_API_KEY` (engine) | Clé API LLM (Z.ai) pour les outils réels | — |
 | `PHANTOM_LLM` / `BASALT_MODEL` | Modèle par outil (format LiteLLM / nom de modèle) | `openai/glm-4.6` / `glm-4.6` |
+| `DEEPAUDIT_API_URL` / `DEEPAUDIT_EMAIL` / `DEEPAUDIT_PASSWORD` (engine) | Connexion à la plateforme DeepAudit (ex. `http://deepaudit-backend:8000`) | — |
+| `REDAMON_API_URL` / `REDAMON_EMAIL` / `REDAMON_PASSWORD` (engine) | Connexion à la plateforme RedAmon (webapp, ex. `http://redamon-webapp:3000`) | — |
 | `DEMO_SEED` (app) | `1` = créer les comptes de démo (identifiants publics) | `0` en production |
 | `ADMIN_USERNAME` / `ADMIN_PASSWORD` (app) | Premier compte ADMIN créé au premier démarrage (amorçage) | — |
 | `MAX_CONCURRENT_SCANS` (engine) | Plafond global de scans simultanés (protection VPS) | `3` |
@@ -299,7 +328,7 @@ Authentification par cookie de session (`af_session`). Erreurs uniformes `{ "err
 | Symptôme | Cause probable / solution |
 |---|---|
 | « Moteur hors ligne » dans l'interface | `scan-engine` n'est pas lancé (`mini-services/scan-engine && bun run dev`) ou `ENGINE_URL` incorrect |
-| Badge « Simulation (réel indisponible) » | Voir la raison affichée sous le badge : binaire absent (`pip install phantom-agent` / `pipx install basalt-scan`), Docker indisponible, ou plateforme dédiée non déployée (DeepAudit/RedAmon) |
+| Badge « Simulation (réel indisponible) » | Voir la raison affichée sous le badge : binaire absent (`pip install phantom-agent` / `pipx install basalt-scan`), Docker indisponible, plateforme distante non configurée (`DEEPAUDIT_API_URL` / `REDAMON_API_URL`) ou injoignable, identifiants refusés |
 | Scan réel en échec « Exécution réelle indisponible » | Mode `real` strict — installez l'outil manquant ou repassez en `auto` |
 | Scan réel en échec LLM | Vérifiez `LLM_API_BASE` / `LLM_API_KEY` (endpoint OpenAI-compatible joignable depuis le moteur) |
 | `429 Trop de tentatives` | Rate limiting de connexion — attendez la fin de la fenêtre de 10 min |

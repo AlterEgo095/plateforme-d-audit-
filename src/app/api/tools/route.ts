@@ -4,7 +4,7 @@
  */
 import { NextResponse } from 'next/server'
 import { requireAuth } from '@/lib/auth'
-import { engineHealth } from '@/lib/engine-client'
+import { engineHealth, engineToolsStatus } from '@/lib/engine-client'
 import { TOOL_TARGET_COMPAT } from '@/lib/dto'
 import { withApi } from '@/lib/route-handler'
 import type { ToolInfo } from '@/lib/types'
@@ -68,9 +68,20 @@ export const GET = withApi(async () => {
   if (session instanceof NextResponse) return session
 
   const online = await engineHealth()
-  const tools = TOOL_CATALOG.map((tool) => ({
-    ...tool,
-    status: (online ? 'CONNECTE' : 'HORS_LIGNE') as ToolInfo['status'],
-  }))
+  // Statut d'exécution réelle par outil (peut prendre quelques secondes : sondes
+  // des binaires) — best effort : indisponible si le moteur ne répond pas.
+  const realStatus = online ? await engineToolsStatus() : null
+  const statusByTool = new Map(realStatus?.map((s) => [s.tool, s]) ?? [])
+
+  const tools = TOOL_CATALOG.map((tool) => {
+    const real = statusByTool.get(tool.id)
+    return {
+      ...tool,
+      status: (online ? 'CONNECTE' : 'HORS_LIGNE') as ToolInfo['status'],
+      execMode: real?.mode,
+      realAvailable: real?.realAvailable,
+      realReason: real?.reason,
+    }
+  })
   return NextResponse.json({ tools })
 })

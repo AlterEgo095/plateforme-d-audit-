@@ -1,7 +1,9 @@
 # ── AuditForge — image du moteur d'exécution (mini-services/scan-engine) ────
-# Service socket.io + API interne /internal/* (simulation des outils d'audit).
+# Service socket.io + API interne /internal/* + ADAPTATEURS D'EXÉCUTION RÉELLE
+# (Phantom, Basalt installés via pip — leurs sandbox utilisent le socket Docker
+# de l'hôte : monter /var/run/docker.sock au déploiement, voir docker-compose).
 
-# ── 1) Dépendances + génération du client Prisma ────────────────────────────
+# ── 1) Dépendances Bun + génération du client Prisma ────────────────────────
 FROM oven/bun:1 AS build
 WORKDIR /engine
 # Le schéma est requis avant l'installation (postinstall @prisma/client).
@@ -11,11 +13,26 @@ RUN bun install --frozen-lockfile
 COPY mini-services/scan-engine/src ./src
 RUN bunx prisma generate
 
-# ── 2) Exécution ────────────────────────────────────────────────────────────
-FROM oven/bun:1 AS runner
+# ── 2) Exécution : Python 3.12 (outils réels) + Bun (moteur) ────────────────
+FROM python:3.12-slim AS runner
 WORKDIR /engine
-ENV NODE_ENV=production
+ENV NODE_ENV=production PYTHONUNBUFFERED=1
+
+# Outils système : openssl (moteurs Prisma), git (clonage des cibles GIT),
+# ca-certificates (TLS vers l'API LLM). Le SDK Python `docker` (dépendance des
+# outils) pilote la sandbox via /var/run/docker.sock — pas de CLI requis.
+RUN apt-get update -y \
+    && apt-get install -y --no-install-recommends openssl ca-certificates git \
+    && rm -rf /var/lib/apt/lists/*
+
+# Outils d'audit réels (Phantom — sandbox Kali, Basalt — sandbox PoC sans réseau).
+# Attention : le premier scan Phantom tire l'image sandbox (~13 Go, une seule fois).
+RUN pip install --no-cache-dir phantom-agent basalt-scan
+
+# Bun (binaire autonome) + code du moteur (client Prisma généré inclus).
+COPY --from=oven/bun:1 /usr/local/bin/bun /usr/local/bin/bun
 COPY --from=build /engine /engine
+
 EXPOSE 3030
 
 # BIND_HOST est fourni par docker-compose (0.0.0.0 dans le réseau interne

@@ -48,20 +48,60 @@ En **déploiement Docker**, un reverse proxy **Caddy** est le seul point d'entr�
 
 ### Les quatre moteurs intégrés
 
-| Outil | Cibles supportées | Spécialité | Vérification PoC |
+| Outil | Cibles supportées | Spécialité | Exécution réelle |
 |---|---|---|---|
-| **Phantom** | URL, Réseau | Agent IA offensif : reconnaissance, énumération, exploitation | Mixte (probable / confirmé) |
-| **DeepAudit** | URL, Git | Audit de code multi-agents (Recon → Analyse → Vérification) | ~70 % confirmés (agent de vérification) |
-| **Basalt** | URL, Git | Scanner ciblé avec **sentinelle `BASALT-POC-TRIGGERED`** | 100 % vérifiés en sandbox sans réseau |
-| **RedAmon** | URL, Réseau | Reconnaissance et exploitation d'infrastructure (ports, sous-domaines, fingerprint) | Mixte (confirmé / probable) |
+| **Phantom** | URL, Réseau | Agent IA offensif : reconnaissance, énumération, exploitation | ✅ adaptateur natif (agent ReAct authentique) |
+| **DeepAudit** | URL, Git | Audit de code multi-agents (Recon → Analyse → Vérification) | 🔜 via sa plateforme dédiée (VPS) |
+| **Basalt** | URL, Git | Scanner ciblé avec **sentinelle `BASALT-POC-TRIGGERED`** | ✅ adaptateur natif (PoC exécuté réellement) |
+| **RedAmon** | URL, Réseau | Reconnaissance et exploitation d'infrastructure (ports, sous-domaines, fingerprint) | 🔜 via sa plateforme dédiée (VPS) |
+
+> En mode `simulation` (ou lorsqu'un outil réel est indisponible), chaque outil est reproduit par un pipeline réaliste : phases pondérées, logs crédibles, constats structurés, sentinelles PoC — sans toucher aucune cible.
 
 ---
 
-## 🧪 Le moteur d'exécution — précision importante
+## ⚙️ Exécution réelle des outils — mode d'emploi
 
-Le mini-service `scan-engine` livré ici est un **moteur de simulation réaliste** : il reproduit fidèlement le déroulé d'une exécution (phases pondérées par outil, commandes réalistes, densité de logs, constats structurés avec preuves et PoC, sentinelles de vérification, durées par profil). Il rend la plateforme **complètement démontrable et testable de bout en bout, sans aucune dépendance extérieure ni risque**.
+Le moteur d'exécution (`scan-engine`) fonctionne selon **deux modes**, contrôlés par la variable `TOOL_EXECUTION_MODE` :
 
-L'interface interne du moteur (`POST /internal/run`, `/internal/cancel`, `/internal/health`, événements socket.io) est **stables et documentées** : pour brancher les outils réels, il suffit de remplacer les pipelines de simulation par l'orchestration Docker réelle des sandboxes (Phantom / DeepAudit / RedAmon) et des exécutions CLI (Basalt), en conservant les mêmes contrats d'événements et de persistance. **Toute la couche plateforme — campagnes, temps réel, consolidation, RBAC, rapports, traçabilité — est finalisée.**
+| Mode | Comportement |
+|---|---|
+| `simulation` (défaut historique) | Pipelines simulés réalistes (phases, logs, constats) — **aucune cible touchée**. Idéal pour la démo et les tests. |
+| `auto` (recommandé) | **Exécution réelle si l'outil est disponible** (binaire + Docker), sinon bascule en simulation avec une ligne de journal explicite dans le terminal du scan. |
+| `real` | Exécution réelle stricte — le scan passe en échec si l'outil n'est pas prêt. |
+
+### Outils réels intégrés (adaptateurs natifs)
+
+| Outil | Adaptateur | Exécution |
+|---|---|---|
+| **Phantom** | ✅ natif — CLI `phantom scan -t <cible> -m quick\|standard\|deep --non-interactive --json` (agent ReAct authentique, sandbox Kali éphémère) | Requiert `pip install phantom-agent` + Docker + LLM |
+| **Basalt** | ✅ natif — CLI `basalt audit <dépôt> --format json` (constats confirmés **uniquement si le PoC s'exécute** — sentinelle `BASALT-POC-TRIGGERED` réelle) | Requiert `pipx install basalt-scan` + Docker + LLM |
+| **DeepAudit** | 🔜 plateforme dédiée — déployer sa stack (`docker compose` du dépôt) puis brancher son API REST (procédure dans `docs/`) | Simulation en attendant |
+| **RedAmon** | 🔜 plateforme dédiée — déployer sa stack (`docker compose` du dépôt) puis brancher son API/MCP | Simulation en attendant |
+
+Le badge de chaque outil (vue **Outils**) indique le mode effectif et la raison d'une éventuelle indisponibilité (`GET /api/tools` → `realAvailable`, `realReason`).
+
+### Configuration LLM (Z.ai)
+
+Les outils réels sont des agents IA : ils ont besoin d'un LLM compatible OpenAI. AuditForge supporte **Z.ai** directement :
+
+```bash
+# Dans .env (ou variables du docker-compose)
+TOOL_EXECUTION_MODE=auto
+LLM_API_BASE=https://api.z.ai/api/paas/v4   # endpoint OpenAI-compatible Z.ai
+LLM_API_KEY=votre-clé-zai
+PHANTOM_LLM=openai/glm-4.6                  # format LiteLLM provider/model
+BASALT_MODEL=glm-4.6
+```
+
+Un **pont LLM** (`mini-services/llm-bridge/`, port 3031) est également fourni : il expose un endpoint `/v1/chat/completions` standard adossé au SDK Z.ai — pratique pour le développement local ou pour centraliser la clé. En production, pointer directement vers `https://api.z.ai/api/paas/v4` est plus simple.
+
+### Prérequis de l'exécution réelle
+
+1. **Docker** accessible par le moteur (en Docker Compose : montage `/var/run/docker.sock` déjà prévu) ;
+2. **Binaires installés** : `pip install phantom-agent` et `pipx install basalt-scan` (l'image `Dockerfile.engine` les installe automatiquement) ;
+3. **Premier scan Phantom** : l'image sandbox Kali (~13 Go) est téléchargée une seule fois ;
+4. **Cibles autorisées** : Phantom accepte les cibles URL ; Basalt et DeepAudit auditent du code (cibles GIT, clonées automatiquement par le moteur) ;
+5. Les constats réels alimentent exactement le même pipeline que la simulation : temps réel socket.io, vulnérabilités, qualification, rapports PDF, journal d'audit.
 
 ---
 
@@ -146,6 +186,10 @@ docker compose up -d --build
 | `DATABASE_URL` (app + engine) | Chemin SQLite dans le volume | `file:/data/auditforge.db` |
 | `ENGINE_URL` (app) | URL interne du moteur | `http://engine:3030` |
 | `BIND_HOST` (engine) | Interface d'écoute — `0.0.0.0` **uniquement dans le réseau Docker** | `127.0.0.1` |
+| `TOOL_EXECUTION_MODE` (engine) | `simulation` / `auto` / `real` — voir section *Exécution réelle* | `auto` |
+| `LLM_API_BASE` (engine) | Endpoint OpenAI-compatible des outils réels (Z.ai direct ou pont) | `https://api.z.ai/api/paas/v4` |
+| `LLM_API_KEY` (engine) | Clé API LLM (Z.ai) pour les outils réels | — |
+| `PHANTOM_LLM` / `BASALT_MODEL` | Modèle par outil (format LiteLLM / nom de modèle) | `openai/glm-4.6` / `glm-4.6` |
 
 ---
 
@@ -208,7 +252,7 @@ Authentification par cookie de session (`af_session`). Erreurs uniformes `{ "err
 .
 ├── docker-compose.yml          # Pile complète (app + engine + Caddy)
 ├── Dockerfile                  # Image application Next.js (standalone)
-├── Dockerfile.engine           # Image moteur d'exécution
+├── Dockerfile.engine           # Image moteur + outils réels (Phantom, Basalt)
 ├── Caddyfile.docker            # Reverse proxy (HTTPS automatique)
 ├── prisma/schema.prisma        # Modèle de données (SQLite)
 ├── src/
@@ -219,13 +263,16 @@ Authentification par cookie de session (`af_session`). Erreurs uniformes `{ "err
 │   ├── hooks/use-socket.ts     # Client socket.io authentifié (singleton)
 │   └── lib/                    # auth (scrypt/HMAC/MFA), RBAC, DTO, seed,
 │                               # engine-client, rate-limit, mutex, audit trail…
-└── mini-services/scan-engine/  # Moteur d'exécution (Bun + socket.io + Prisma)
-    ├── prisma/schema.prisma    # Schéma identique (base partagée)
-    └── src/
-        ├── index.ts            # HTTP /internal/* + socket.io + recovery
-        ├── engine.ts           # Orchestration des exécutions (rooms, persistance)
-        ├── templates.ts        # Pipelines de phases + logs réalistes par outil
-        └── session.ts          # Vérification des sessions (handshake)
+└── mini-services/
+    ├── scan-engine/            # Moteur d'exécution (Bun + socket.io + Prisma)
+    │   └── src/
+    │       ├── index.ts        # HTTP /internal/* + socket.io + recovery
+    │       ├── engine.ts       # Orchestration (branchement réel ⇄ simulation)
+    │       ├── real-exec/      # ADAPTATEURS RÉELS : phantom.ts, basalt.ts,
+    │       │                   #   proc.ts (subprocess), git-target.ts, env.ts
+    │       ├── templates.ts    # Pipelines de simulation par outil
+    │       └── session.ts      # Vérification des sessions (handshake)
+    └── llm-bridge/             # Pont LLM OpenAI-compatible (Z.ai, :3031)
 ```
 
 ---
@@ -235,6 +282,9 @@ Authentification par cookie de session (`af_session`). Erreurs uniformes `{ "err
 | Symptôme | Cause probable / solution |
 |---|---|
 | « Moteur hors ligne » dans l'interface | `scan-engine` n'est pas lancé (`mini-services/scan-engine && bun run dev`) ou `ENGINE_URL` incorrect |
+| Badge « Simulation (réel indisponible) » | Voir la raison affichée sous le badge : binaire absent (`pip install phantom-agent` / `pipx install basalt-scan`), Docker indisponible, ou plateforme dédiée non déployée (DeepAudit/RedAmon) |
+| Scan réel en échec « Exécution réelle indisponible » | Mode `real` strict — installez l'outil manquant ou repassez en `auto` |
+| Scan réel en échec LLM | Vérifiez `LLM_API_BASE` / `LLM_API_KEY` (endpoint OpenAI-compatible joignable depuis le moteur) |
 | `429 Trop de tentatives` | Rate limiting de connexion — attendez la fin de la fenêtre de 10 min |
 | Connexion refusée / scans en échec au lancement | Vérifiez que `ENGINE_INTERNAL_TOKEN` est **identique** dans `.env` (app) et `mini-services/scan-engine/.env` |
 | `Environment variable not found: DATABASE_URL` | Créez `.env` depuis `.env.example` (chemin absolu recommandé) puis `bun run db:push` |

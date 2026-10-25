@@ -135,6 +135,12 @@ export interface ToolInfo {
   capabilities: string[];
   supportedTargets: TargetType[];
   status: "CONNECTE" | "HORS_LIGNE";
+  /** Mode d'exécution du moteur : simulation | auto | real. */
+  execMode?: "simulation" | "auto" | "real";
+  /** true si l'outil authentique est exécutable par le moteur (binaire + Docker). */
+  realAvailable?: boolean;
+  /** Raison d'indisponibilité de l'exécution réelle, le cas échéant. */
+  realReason?: string;
 }
 
 // ─── Événements socket.io (moteur :3030 → navigateur) ────────────────

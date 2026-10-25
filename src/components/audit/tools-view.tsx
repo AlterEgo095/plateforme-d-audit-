@@ -17,6 +17,7 @@ import {
   Server,
   TerminalSquare,
   XCircle,
+  FlaskConical,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -174,18 +175,21 @@ export function ToolsView() {
 
   return (
     <div className="space-y-6">
-      {/* Bannière démo */}
+      {/* Bannière mode d'exécution */}
       <Card className="border-amber-500/30 bg-amber-500/5">
         <CardContent className="flex flex-col gap-3 p-4 sm:flex-row sm:items-center">
           <div className="flex items-start gap-3">
             <Info className="mt-0.5 size-5 shrink-0 text-amber-400" aria-hidden />
             <div className="text-sm leading-relaxed">
-              <p className="font-semibold">Environnement de démonstration</p>
+              <p className="font-semibold">Mode d&apos;exécution des outils</p>
               <p className="text-muted-foreground">
-                AuditForge fonctionne avec un moteur de simulation embarqué :
-                les outils exécutent des pipelines simulés (logs réalistes,
-                vulnérabilités générées, PoC vérifiés en sandbox) sans aucune
-                dépendance externe ni trafic réseau réel.
+                Le moteur distingue exécution <strong>réelle</strong> (outil
+                authentique — binaire + Docker + LLM requis) et{" "}
+                <strong>simulation</strong> (pipelines réalistes, aucune cible
+                touchée). Le badge de chaque outil indique le mode effectif ;
+                la bascule se configure via{" "}
+                <code className="font-mono text-xs">TOOL_EXECUTION_MODE</code>{" "}
+                (simulation / auto / real).
               </p>
             </div>
           </div>
@@ -260,6 +264,18 @@ export function ToolsView() {
 
 function ToolCard({ tool }: { tool: ToolInfo }) {
   const online = tool.status === "CONNECTE";
+  // Statut d'exécution : réel si l'outil authentique est prêt côté moteur ;
+  // sinon simulation (bascule documentée en clair pour l'opérateur).
+  const realReady = tool.realAvailable === true;
+  const realBadge = tool.execMode
+    ? realReady
+      ? { label: "Exécution réelle active", cls: "border-emerald-500/40 bg-emerald-500/10 text-emerald-400", icon: FlaskConical }
+      : {
+          label: "Simulation (réel indisponible)",
+          cls: "border-amber-500/40 bg-amber-500/10 text-amber-400",
+          icon: FlaskConical,
+        }
+    : null;
   return (
     <Card className="flex flex-col gap-3">
       <CardHeader className="pb-0">
@@ -281,7 +297,23 @@ function ToolCard({ tool }: { tool: ToolInfo }) {
             )}
             {online ? "Connecté" : "Hors ligne"}
           </span>
+          {realBadge && (
+            <span
+              className={cn(
+                "inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-[11px] font-medium",
+                realBadge.cls,
+              )}
+              title={tool.realReason ?? undefined}
+              role="status"
+            >
+              <realBadge.icon className="size-3" aria-hidden />
+              {realBadge.label}
+            </span>
+          )}
         </div>
+        {realBadge && !realReady && tool.realReason && (
+          <p className="text-muted-foreground text-[11px] italic">{tool.realReason}</p>
+        )}
         <CardTitle className="text-sm font-medium text-muted-foreground">
           {tool.nature}
         </CardTitle>

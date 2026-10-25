@@ -282,13 +282,10 @@ export function AppShell({
       {/* Pied de page collant */}
       <footer className="mt-auto border-t md:pl-60 print:hidden">
         <div className="text-muted-foreground mx-auto flex w-full max-w-7xl flex-col gap-1 px-4 py-4 text-xs sm:flex-row sm:items-center sm:justify-between">
-          <p>
-            AuditForge v1.0 — Plateforme d&apos;audit unifiée auto-hébergée · Moteur
-            de simulation local
-          </p>
+          <p>AuditForge v1.0 — Plateforme d&apos;audit unifiée auto-hébergée</p>
           <p className="sm:text-right">
-            Environnement de démonstration : les outils s&apos;exécutent dans un
-            moteur de simulation embarqué (aucune dépendance externe).
+            Exécution réelle ou simulation selon la configuration du moteur
+            (TOOL_EXECUTION_MODE).
           </p>
         </div>
       </footer>

@@ -89,3 +89,27 @@ export async function engineHealth(): Promise<boolean> {
     return false
   }
 }
+
+/** Statut d'exécution réelle par outil : GET /internal/tools-status (timeout 15 s). */
+export interface EngineToolStatus {
+  tool: string
+  mode: 'simulation' | 'auto' | 'real'
+  realAvailable: boolean
+  reason?: string
+}
+
+export async function engineToolsStatus(): Promise<EngineToolStatus[] | null> {
+  try {
+    const res = await fetch(`${ENGINE_URL}/internal/tools-status`, {
+      headers: internalHeaders(),
+      cache: 'no-store',
+      signal: AbortSignal.timeout(15000),
+    })
+    if (!res.ok) return null
+    const body = (await res.json()) as { ok?: boolean; mode?: string; tools?: EngineToolStatus[] }
+    if (body?.ok !== true || !Array.isArray(body.tools)) return null
+    return body.tools
+  } catch {
+    return null
+  }
+}

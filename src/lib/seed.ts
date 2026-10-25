@@ -37,8 +37,11 @@ export async function ensureSeed(): Promise<void> {
 /** PRAGMA SQLite recommandés pour la cohabitation Next.js ⇄ moteur (WAL). Best effort. */
 async function applyPragmas(): Promise<void> {
   try {
-    await db.$executeRawUnsafe('PRAGMA journal_mode=WAL;')
-    await db.$executeRawUnsafe('PRAGMA busy_timeout=5000;')
+    // journal_mode RENVOIE une ligne ("wal") → $queryRawUnsafe obligatoire
+    // ($executeRawUnsafe échoue avec "Execute returned results" — cf. moteur).
+    // Idem pour busy_timeout=5000 (tout PRAGMA d'affectation renvoie sa valeur).
+    await db.$queryRawUnsafe('PRAGMA journal_mode=WAL;')
+    await db.$queryRawUnsafe('PRAGMA busy_timeout=5000;')
   } catch (error) {
     console.error('[seed] PRAGMA ignorés', error)
   }

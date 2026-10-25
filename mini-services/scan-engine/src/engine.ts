@@ -31,6 +31,10 @@ import {
   type FindingTemplate,
   type PhaseBound,
 } from "./templates";
+import { currentExecMode, getRealAdapter } from "./real-exec/index";
+import { REAL_EXEC } from "./real-exec/env";
+import { makeWorkdir, removeWorkdir } from "./real-exec/proc";
+import type { RealFinding, RealToolAdapter } from "./real-exec/types";
 // Import de TYPE uniquement (aucun cycle à l'exécution) — interface définie dans index.ts.
 import type { ServerToClientEvents } from "./index";
 import type {
@@ -336,6 +340,39 @@ export class ScanEngine {
 
     this.emitUpdate(this.updateEvent(cfg, campaignId, "RUNNING", 0, bounds[0].name, 0, 0));
 
+    // ── Branchement exécution réelle vs simulation ──
+    // mode "simulation" → chemin historique ; "auto" → réel si disponible,
+    // sinon bascule explicite ; "real" → échec clair si indisponible.
+    const mode = currentExecMode();
+    if (mode !== "simulation") {
+      const adapter = getRealAdapter(cfg.tool);
+      if (adapter) {
+        const avail = await adapter.checkAvailable();
+        if (avail.available) {
+          await this.runRealScan(cfg, ctrl, st, pushLog, flushPending, adapter, bounds[0].name);
+          return;
+        }
+        if (mode === "real") {
+          throw new Error(`Exécution réelle indisponible pour ${cfg.tool} : ${avail.reason ?? "environnement non préparé"}`);
+        }
+        pushLog(
+          "WARN",
+          "systeme",
+          `Exécution réelle indisponible pour ${cfg.tool} (${avail.reason ?? "inconnue"}) — bascule en SIMULATION pour ce scan.`,
+        );
+      } else if (mode === "real") {
+        throw new Error(
+          `Aucun adaptateur réel pour ${cfg.tool} — DEEPAUDIT/REDAMON nécessitent le déploiement de leurs plateformes (voir README).`,
+        );
+      } else {
+        pushLog(
+          "WARN",
+          "systeme",
+          `${cfg.tool} : adaptateur réel non implémenté (plateforme dédiée requise) — SIMULATION pour ce scan.`,
+        );
+      }
+    }
+
     // Script de simulation (lignes triées, atMs strictement croissant)
     const script = SCRIPT_BUILDERS[cfg.tool]({
       target: cfg.target,
@@ -451,6 +488,23 @@ export class ScanEngine {
       return;
     }
 
+    await this.finalizeCompleted(cfg, campaignId, t0, st, pushLog, flushPending, bounds[st.phaseIdx].name);
+  }
+
+  /**
+   * Finalisation commune COMPLETED (simulation ET réel) : log de synthèse,
+   * flush final, mise à jour DB avec 1 retry (N.25) puis événements —
+   * bascule FAILED cohérente si la persistance échoue définitivement.
+   */
+  private async finalizeCompleted(
+    cfg: EngineRunParams,
+    campaignId: string,
+    t0: number,
+    st: RunState,
+    pushLog: (level: LogLevel, source: string, message: string) => void,
+    flushPending: () => Promise<void>,
+    lastPhaseName: string,
+  ): Promise<void> {
     const durationMs = Date.now() - t0;
     pushLog(
       "SUCCESS",
@@ -516,7 +570,7 @@ export class ScanEngine {
           campaignId,
           "FAILED",
           st.progress,
-          bounds[st.phaseIdx].name,
+          lastPhaseName,
           st.findingsCount,
           st.criticalCount,
         ),
@@ -533,6 +587,199 @@ export class ScanEngine {
       io().emit("scan:done", done);
       this.running.delete(cfg.scanId);
     }
+  }
+
+  // ── Exécution réelle (outils authentiques) ──
+
+  /**
+   * Exécute l'outil RÉEL via son adaptateur : diffusion des lignes de sortie,
+   * progression temporelle heuristique, constats réels persistés puis
+   * finalisation COMPLETED partagée. Annulation → kill du processus + CANCELLED.
+   */
+  private async runRealScan(
+    cfg: EngineRunParams,
+    ctrl: RunningEntry,
+    st: RunState,
+    pushLog: (level: LogLevel, source: string, message: string) => void,
+    flushPending: () => Promise<void>,
+    adapter: RealToolAdapter,
+    initialPhase: string,
+  ): Promise<void> {
+    const t0 = Date.now();
+    const campaignId = cfg.campaignId;
+    const estMs = REAL_EXEC.estimatedMs(cfg.tool as "PHANTOM" | "BASALT", cfg.profile);
+    let lastPhase = initialPhase;
+
+    const abortController = new AbortController();
+    const cancelWatcher = setInterval(() => {
+      if (ctrl.aborted && !abortController.signal.aborted) {
+        pushLog("WARN", "systeme", "Annulation demandée — arrêt du processus réel…");
+        adapter.cancel?.();
+        abortController.abort();
+      }
+    }, 1000);
+
+    let workdir: string | null = null;
+    try {
+      workdir = await makeWorkdir(cfg.scanId);
+      pushLog(
+        "INFO",
+        "systeme",
+        `MODE RÉEL — ${cfg.tool} sera exécuté authentiquement (adaptateur réel, profil ${cfg.profile}).`,
+      );
+      await flushPending();
+
+      // Progression heuristique (temps écoulé / durée estimée) — plafonnée à 95 %.
+      const ticker = setInterval(() => {
+        const pct = Math.min(95, Math.round((100 * (Date.now() - t0)) / estMs));
+        st.progress = pct;
+        void (async () => {
+          try {
+            await db.scan.update({ where: { id: cfg.scanId }, data: { progress: pct, phase: lastPhase } });
+          } catch {
+            /* best effort — la persistance suivante resynchronisera */
+          }
+          this.emitUpdate(
+            this.updateEvent(cfg, campaignId, "RUNNING", pct, lastPhase, st.findingsCount, st.criticalCount),
+          );
+        })();
+      }, 3000);
+
+      let findings: RealFinding[] = [];
+      try {
+        findings = await adapter.run({
+          scanId: cfg.scanId,
+          campaignId,
+          tool: cfg.tool,
+          target: cfg.target,
+          targetType: cfg.targetType,
+          profile: cfg.profile,
+          workdir,
+          signal: abortController.signal,
+          onLog: async (message, level, source) => {
+            pushLog(level ?? "TOOL", source ?? cfg.tool.toLowerCase(), message);
+            if (st.pending.length >= 40) await flushPending();
+          },
+          onPhase: async (phase, pct) => {
+            lastPhase = phase.slice(0, 64);
+            if (typeof pct === "number") st.progress = Math.max(st.progress, Math.min(99, pct));
+            try {
+              await db.scan.update({
+                where: { id: cfg.scanId },
+                data: { phase: lastPhase, ...(typeof pct === "number" ? { progress: st.progress } : {}) },
+              });
+            } catch {
+              /* best effort */
+            }
+            this.emitUpdate(
+              this.updateEvent(cfg, campaignId, "RUNNING", st.progress, lastPhase, st.findingsCount, st.criticalCount),
+            );
+          },
+        });
+      } finally {
+        clearInterval(ticker);
+      }
+
+      // Fenêtre cancel→final (N.25) : l'annulation peut survenir pendant l'outil.
+      if (ctrl.aborted) {
+        await flushPending();
+        await this.finalizeCancelled(cfg, campaignId, t0, st, lastPhase);
+        return;
+      }
+
+      const created = await this.createRealFindings(cfg, findings, pushLog);
+      st.findingsCount = created.count;
+      st.criticalCount = created.critical;
+      st.progress = 100;
+      await flushPending();
+      if (ctrl.aborted) {
+        await flushPending();
+        await this.finalizeCancelled(cfg, campaignId, t0, st, lastPhase);
+        return;
+      }
+      await this.finalizeCompleted(cfg, campaignId, t0, st, pushLog, flushPending, lastPhase);
+    } finally {
+      clearInterval(cancelWatcher);
+      await removeWorkdir(workdir);
+    }
+  }
+
+  /** Persiste les constats réels (mêmes champs que la simulation) + événements. */
+  private async createRealFindings(
+    cfg: EngineRunParams,
+    findings: RealFinding[],
+    pushLog: (level: LogLevel, source: string, message: string) => void,
+  ): Promise<{ count: number; critical: number }> {
+    let count = 0;
+    let critical = 0;
+
+    for (const f of findings) {
+      try {
+        const row = await db.finding.create({
+          data: {
+            scanId: cfg.scanId,
+            tool: cfg.tool,
+            title: f.title.slice(0, 500),
+            severity: f.severity,
+            confidence: f.confidence,
+            category: (f.category || "général").slice(0, 120),
+            cve: f.cve ?? null,
+            cvss: f.cvss ?? null,
+            location: f.location?.slice(0, 500) ?? null,
+            description: f.description,
+            evidence: f.evidence,
+            poc: f.poc ?? "",
+            sentinelTriggered: f.sentinelTriggered,
+            status: "OPEN",
+            remediation: f.remediation ?? null,
+          },
+        });
+
+        const finding: FindingDTO = {
+          id: row.id,
+          scanId: row.scanId,
+          tool: cfg.tool,
+          title: row.title,
+          severity: row.severity as Severity,
+          confidence: row.confidence as Confidence,
+          category: row.category,
+          cve: row.cve,
+          cvss: row.cvss,
+          location: row.location,
+          description: row.description,
+          evidence: row.evidence,
+          poc: row.poc,
+          sentinelTriggered: row.sentinelTriggered,
+          status: row.status as FindingStatus,
+          remediation: row.remediation,
+          createdAt: row.createdAt.toISOString(),
+        };
+        const event: ScanFindingEvent = { scanId: cfg.scanId, finding };
+        io().to(`scan:${cfg.scanId}`).emit("scan:finding", event);
+
+        if (f.sentinelTriggered) {
+          pushLog(
+            "SUCCESS",
+            "sentinelle",
+            `PoC exécuté avec succès — « ${f.title} » confirmé par l'outil réel.`,
+          );
+        }
+        count += 1;
+        if (f.severity === "CRITICAL") critical += 1;
+      } catch (err) {
+        console.error(`[scan-engine] création du constat réel impossible pour ${cfg.scanId}:`, err);
+      }
+    }
+
+    try {
+      await db.scan.update({
+        where: { id: cfg.scanId },
+        data: { findingsCount: count, criticalCount: critical },
+      });
+    } catch (err) {
+      console.warn(`[engine] mise à jour des compteurs de constats impossible pour ${cfg.scanId}`, err);
+    }
+    return { count, critical };
   }
 
   /** Constat local (socket + base, best effort) si des logs ont été perdus (N.25). */

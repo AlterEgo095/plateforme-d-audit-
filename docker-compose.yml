@@ -1,11 +1,12 @@
 # ── AuditForge — orchestration complète (VPS auto-hébergé) ──────────────────
 # Usage :
 #   1. cp .env.example .env   puis renseignez AUTH_SECRET / ENGINE_INTERNAL_TOKEN
+#      (+ TOOL_EXECUTION_MODE=real et LLM_API_KEY pour l'exécution réelle)
 #   2. docker compose up -d --build
 #   3. Interface : http://<votre-domaine-ou-ip>/  (HTTPS automatique si SITE_DOMAIN est défini)
 #
-# Architecture réseau : seul Caddy est exposé (80/443). `app` et `engine`
-# vivent sur le réseau interne Docker — `engine` n'est JAMAIS publié sur l'hôte.
+# Architecture réseau : seul Caddy est exposé (80/443). `app`, `engine` et
+# `llm-bridge` vivent sur le réseau interne Docker — aucun n'est publié sur l'hôte.
 
 name: auditforge
 
@@ -26,7 +27,7 @@ services:
     restart: unless-stopped
     # Aucun `ports:` : l'application n'est joignable que via le reverse proxy.
 
-  # ── Moteur d'exécution des scans (socket.io + /internal/*) ────────────────
+  # ── Moteur d'exécution des scans (socket.io + /internal/* + outils réels) ──
   engine:
     build:
       context: .
@@ -38,13 +39,38 @@ services:
       ENGINE_INTERNAL_TOKEN: ${ENGINE_INTERNAL_TOKEN:?Renseignez ENGINE_INTERNAL_TOKEN dans le fichier .env (openssl rand -hex 32)}
       BIND_HOST: 0.0.0.0
       PORT: "3030"
+      # ── Exécution réelle des outils ──
+      # simulation : aucune cible touchée | auto : réel si disponible | real : réel strict
+      TOOL_EXECUTION_MODE: ${TOOL_EXECUTION_MODE:-auto}
+      # LLM des outils réels — endpoint OpenAI-compatible :
+      #   Z.ai direct : https://api.z.ai/api/paas/v4  (clé dans LLM_API_KEY)
+      #   pont local  : http://llm-bridge:3031/v1
+      LLM_API_BASE: ${LLM_API_BASE:-https://api.z.ai/api/paas/v4}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      PHANTOM_LLM: ${PHANTOM_LLM:-openai/glm-4.6}
+      BASALT_MODEL: ${BASALT_MODEL:-glm-4.6}
+      REAL_SCAN_TIMEOUT_MIN: ${REAL_SCAN_TIMEOUT_MIN:-180}
     volumes:
       - auditforge-data:/data
+      # Sandbox Docker des outils réels (Phantom Kali, Basalt PoC) via le
+      # démon Docker de l'hôte. Laissez commenté pour la simulation seule.
+      - /var/run/docker.sock:/var/run/docker.sock
     restart: unless-stopped
     depends_on:
       app:
         condition: service_healthy # le schéma est appliqué au boot de `app`
     # Aucun `ports:` : moteur strictement confiné au réseau interne Docker.
+
+  # ── Pont LLM OpenAI-compatible (Z.ai) — optionnel ──────────────────────────
+  # Utile pour exposer un endpoint /v1 unique aux outils sans y placer la clé.
+  # Sans clé Z.ai intégrée au SDK hors sandbox : préférez LLM_API_BASE direct.
+  # llm-bridge:
+  #   build:
+  #     context: .
+  #     dockerfile: Dockerfile.bridge
+  #   environment:
+  #     LLM_BRIDGE_KEY: ${LLM_BRIDGE_KEY:-}
+  #   restart: unless-stopped
 
   # ── Reverse proxy : unique point d'entrée (80/443) ────────────────────────
   caddy:

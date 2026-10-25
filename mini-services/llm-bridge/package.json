@@ -1,0 +1,13 @@
+{
+  "name": "auditforge-llm-bridge",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Pont LLM OpenAI-compatible pour AuditForge — expose /v1/chat/completions sur Z.ai (z-ai-web-dev-sdk)",
+  "scripts": {
+    "dev": "bun --hot src/index.ts",
+    "start": "bun src/index.ts"
+  },
+  "dependencies": {
+    "z-ai-web-dev-sdk": "^0.0.18"
+  }
+}

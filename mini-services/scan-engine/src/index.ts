@@ -18,6 +18,7 @@ import { Server } from "socket.io";
 import { db } from "./db";
 import { ScanEngine, setIo } from "./engine";
 import { verifySessionToken } from "./session";
+import { currentExecMode, getRealAdapter } from "./real-exec/index";
 import type {
   ClientToServerEvents,
   EngineRunRequest,
@@ -272,6 +273,37 @@ async function route(req: IncomingMessage, res: ServerResponse, engine: ScanEngi
         return;
       }
       sendJson(res, 200, { ok: true, running: engine.runningCount() });
+      return;
+    }
+
+    // ── GET /internal/tools-status — disponibilité réelle par outil ──
+    if (path === "/internal/tools-status" && req.method === "GET") {
+      if (!requireInternalToken(req)) {
+        sendJson(res, 401, { ok: false, error: "unauthorized" });
+        return;
+      }
+      const mode = currentExecMode();
+      const tools: Array<{ tool: string; mode: string; realAvailable: boolean; reason?: string }> = [];
+      for (const tool of TOOLS) {
+        const adapter = getRealAdapter(tool);
+        if (!adapter) {
+          tools.push({
+            tool,
+            mode,
+            realAvailable: false,
+            reason: "adaptateur réel non implémenté — plateforme dédiée requise (DeepAudit/RedAmon)",
+          });
+          continue;
+        }
+        try {
+          const avail = await adapter.checkAvailable();
+          tools.push({ tool, mode, realAvailable: avail.available, reason: avail.reason });
+        } catch (err) {
+          tools.push({ tool, mode, realAvailable: false, reason: "vérification impossible" });
+          void err;
+        }
+      }
+      sendJson(res, 200, { ok: true, mode, tools });
       return;
     }
 

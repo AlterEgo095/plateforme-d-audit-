@@ -40,6 +40,26 @@ RUN install -m 0755 -d /etc/apt/keyrings \
 # Attention : le premier scan Phantom tire l'image sandbox (~13 Go, une seule fois).
 RUN pip install --no-cache-dir phantom-agent basalt-scan
 
+# Correctif amont (phantom-agent 0.9.218, dernière version publiée) : dans
+# interface/cli.py, un `import sys` LOCAL (bloc json_mode, ligne ~448) masque
+# l'import global (ligne 4) : au chemin d'échec de l'agent, `sys.exit(1)` lève
+# UnboundLocalError (« cannot access local variable 'sys' ») qui écrase le vrai
+# message d'erreur et fait échouer le CLI avec le code 1 « et aucun constat ».
+# Suppression du import local — la portée globale suffit ; l'erreur réelle de
+# l'agent est alors affichée (« Penetration test failed: … ») avant la sortie.
+RUN sed -i '/^            import sys$/d' \
+      /usr/local/lib/python3.12/site-packages/phantom/interface/cli.py
+
+# Correctif amont n°2 (phantom-agent 0.9.218) : `_resolve_docker_host()`
+# retourne « 127.0.0.1 » — or la sandbox publie son port tool-server sur
+# l'HÔTE : depuis le conteneur moteur, 127.0.0.1 ne l'expose jamais →
+# « Tool server failed to start / Container initialization timed out » à
+# chaque scan réel (~144 s de healthchecks en échec). On retourne
+# host.docker.internal, résolu vers la passerelle hôte par extra_hosts
+# (service engine, docker-compose.override.yml).
+RUN sed -i 's/^        return "127\.0\.0\.1"$/        return "host.docker.internal"/' \
+      /usr/local/lib/python3.12/site-packages/phantom/runtime/docker_runtime.py
+
 # Bun (binaire autonome) + code du moteur (client Prisma généré inclus).
 COPY --from=oven/bun:1 /usr/local/bin/bun /usr/local/bin/bun
 COPY --from=build /engine /engine

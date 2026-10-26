@@ -19,10 +19,21 @@ WORKDIR /engine
 ENV NODE_ENV=production PYTHONUNBUFFERED=1
 
 # Outils système : openssl (moteurs Prisma), git (clonage des cibles GIT),
-# ca-certificates (TLS vers l'API LLM). Le SDK Python `docker` (dépendance des
-# outils) pilote la sandbox via /var/run/docker.sock — pas de CLI requis.
+# ca-certificates (TLS vers l'API LLM), curl+gnupg (repo Docker pour le CLI).
+# Le SDK Python `docker` (dépendance des outils) pilote la sandbox via
+# /var/run/docker.sock ; le CLI `docker` est requis par la sonde de
+# disponibilité (probeVersion) des adaptateurs Phantom/Basalt.
 RUN apt-get update -y \
-    && apt-get install -y --no-install-recommends openssl ca-certificates git \
+    && apt-get install -y --no-install-recommends openssl ca-certificates git curl gnupg \
+    && rm -rf /var/lib/apt/lists/*
+
+# CLI Docker seul (pas de démon) : le démon utilisé est celui de l'HÔTE via
+# /var/run/docker.sock — aucun service n'est démarré dans ce conteneur.
+RUN install -m 0755 -d /etc/apt/keyrings \
+    && curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc \
+    && echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian trixie stable" > /etc/apt/sources.list.d/docker.list \
+    && apt-get update -y \
+    && apt-get install -y --no-install-recommends docker-ce-cli \
     && rm -rf /var/lib/apt/lists/*
 
 # Outils d'audit réels (Phantom — sandbox Kali, Basalt — sandbox PoC sans réseau).

@@ -14,12 +14,24 @@ import type { Role } from '@/lib/types'
 
 export const SESSION_COOKIE = 'af_session'
 const SESSION_TTL_SECONDS = 8 * 60 * 60 // 8 heures
-const SECRET = process.env.AUTH_SECRET ?? 'auditforge-dev-secret-change-me'
 
-// Sécurité (contrat worklog §K.6) : refuser de démarrer en production sans secret
-// de signature dédié — le fallback est toléré uniquement en développement.
-if (process.env.NODE_ENV === 'production' && !process.env.AUTH_SECRET) {
-  throw new Error('AUTH_SECRET requis en production')
+/**
+ * Secret de signature résolu paresseusement (au premier usage runtime), pas au
+ * chargement du module : `next build` évalue les modules de routes sans
+ * environnement de production complet — une vérification au niveau module
+ * ferait échouer le build (constaté en déploiement Docker, 2026-10-26).
+ * Sécurité (contrat worklog §K.6) : refus au premier appel runtime en
+ * production sans secret dédié — le fallback est toléré uniquement en dev.
+ */
+let cachedSecret: string | null = null
+function getSecret(): string {
+  if (cachedSecret !== null) return cachedSecret
+  const secret = process.env.AUTH_SECRET
+  if (process.env.NODE_ENV === 'production' && !secret) {
+    throw new Error('AUTH_SECRET requis en production')
+  }
+  cachedSecret = secret ?? 'auditforge-dev-secret-change-me'
+  return cachedSecret
 }
 
 const VALID_ROLES: Role[] = ['ADMIN', 'AUDITOR', 'VIEWER']
@@ -56,7 +68,7 @@ export function verifyPassword(pw: string, stored: string): boolean {
 
 function signPayload(payload: Session): string {
   const body = Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url')
-  const sig = createHmac('sha256', SECRET).update(body).digest('base64url')
+  const sig = createHmac('sha256', getSecret()).update(body).digest('base64url')
   return `v1.${body}.${sig}`
 }
 
@@ -81,7 +93,7 @@ export function parseSession(token: string | undefined | null): Session | null {
   const parts = token.split('.')
   if (parts.length !== 3 || parts[0] !== 'v1') return null
   const [, body, sig] = parts
-  const expected = createHmac('sha256', SECRET).update(body).digest('base64url')
+  const expected = createHmac('sha256', getSecret()).update(body).digest('base64url')
   const a = Buffer.from(sig)
   const b = Buffer.from(expected)
   if (a.length !== b.length || !timingSafeEqual(a, b)) return null

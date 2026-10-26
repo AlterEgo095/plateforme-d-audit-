@@ -60,6 +60,18 @@ RUN sed -i '/^            import sys$/d' \
 RUN sed -i 's/^        return "127\.0\.0\.1"$/        return "host.docker.internal"/' \
       /usr/local/lib/python3.12/site-packages/phantom/runtime/docker_runtime.py
 
+# Correctif amont n°3 (phantom-agent 0.9.218) : les listes `priority_tools`
+# des profils standard/deep (phantom/core/scan_profiles.py) n'annoncent pas
+# les outils ajoutés dans la sandbox enrichie (PHANTOM_IMAGE=
+# auditforge/phantom-sandbox-plus — voir Dockerfile.sandbox). On étend ces
+# listes (injectées dans le prompt des agents) avec les binaires réellement
+# installés. quick/stealth/api_only restent volontairement inchangés
+# (périmètre minimal : CI/CD, furtivité, API).
+RUN sed -i 's/priority_tools=\["nmap", "httpx", "nuclei", "sqlmap", "ffuf", "nikto"\]/priority_tools=["nmap", "httpx", "nuclei", "sqlmap", "ffuf", "nikto", "whatweb", "gobuster", "testssl.sh", "xsstrike", "commix", "wpscan", "dalfox", "zaproxy", "hydra"]/' \
+      /usr/local/lib/python3.12/site-packages/phantom/core/scan_profiles.py \
+ && sed -i 's/priority_tools=\["nmap", "httpx", "nuclei", "sqlmap"\]/priority_tools=["nmap", "httpx", "nuclei", "sqlmap", "nikto", "whatweb", "gobuster", "testssl.sh", "xsstrike", "commix", "wpscan", "dalfox", "zaproxy"]/' \
+      /usr/local/lib/python3.12/site-packages/phantom/core/scan_profiles.py
+
 # Bun (binaire autonome) + code du moteur (client Prisma généré inclus).
 COPY --from=oven/bun:1 /usr/local/bin/bun /usr/local/bin/bun
 COPY --from=build /engine /engine

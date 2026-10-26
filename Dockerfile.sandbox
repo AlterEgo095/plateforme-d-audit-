@@ -1,0 +1,59 @@
+# ── AuditForge — image sandbox Kali enrichie pour Phantom ───────────────────
+# Basée sur l'image officielle ghcr.io/usta0x001/phantom-sandbox:latest
+# (Kali Rolling 2025.4 + Caido + tool server) : l'entrypoint, l'utilisateur
+# `pentester` et la configuration proxy Caido sont hérités tels quels.
+#
+# Utilisation : construire puis référencer dans le .env du moteur :
+#   docker build -f Dockerfile.sandbox -t auditforge/phantom-sandbox-plus:latest .
+#   PHANTOM_IMAGE=auditforge/phantom-sandbox-plus:latest
+# (Config.get("phantom_image") lit l'env PHANTOM_IMAGE en priorité —
+#  voir phantom/config/config.py ; passer la variable au service `engine`
+#  via docker-compose.yml.)
+
+FROM ghcr.io/usta0x001/phantom-sandbox:latest
+
+# ── Couche 1 : outils web ciblés (léger, ~500 Mo) ───────────────────────────
+# Installation un-par-un : un paquet absent ne casse pas la couche entière
+# (les dépôts Kali Rolling bougent) ; l'inventaire en fin de couche rend
+# l'absence visible dans le log de build.
+#   commix     — injection de commandes OS (série RCE)
+#   xsstrike   — XSS avancé (DOM, mutation, blind)
+#   nikto      — scanner de serveur web (déjà cité par les profils Phantom)
+#   whatweb    — fingerprinting web (technos, CMS, headers)
+#   gobuster   — énumération répertoires / vhosts / DNS
+#   dirb       — énumération répertoires (wordlists intégrées)
+#   wfuzz      — fuzzer web paramétrable
+#   testssl.sh — audit TLS/SSL détaillé (ciphers, protocoles, ACME…)
+#   sslscan    — audit TLS rapide
+#   hydra      — brute-force d'authentification (HTTP forms, SSH…)
+#   wafw00f    — détection et fingerprint de WAF
+#   dalfox     — scanner XSS paramétré (pipelines URL/params)
+#   seclists   — wordlists de référence (utilisées par ffuf/gobuster/dirb)
+RUN apt-get update -y \
+    && for p in commix xsstrike nikto whatweb gobuster dirb wfuzz \
+                testssl.sh sslscan hydra wafw00f dalfox seclists; do \
+         apt-get install -y --no-install-recommends "$p" \
+           || echo "!! paquet indisponible dans les dépôts: $p"; \
+       done \
+    && rm -rf /var/lib/apt/lists/* \
+    && echo "=== Inventaire des outils ajoutés (couche 1) ===" \
+    && for t in commix xsstrike nikto whatweb gobuster dirb wfuzz \
+                testssl.sh sslscan hydra wafw00f dalfox; do \
+         printf '%-12s %s\n' "$t" "$(command -v "$t" || echo ABSENT)"; \
+       done
+
+# ── Couche 2 : Metasploit Framework (lourd, ~2-3 Go décompressés) ───────────
+# Exploitation (msfconsole / msfvenom) — utile en profil DEEP quand la
+# reconnaissance révèle des services réseau exploitables (pas seulement web).
+# Échec volontaire du build si l'installation échoue (visible dans le log).
+RUN apt-get update -y \
+    && apt-get install -y --no-install-recommends metasploit-framework \
+    && rm -rf /var/lib/apt/lists/* \
+    && msfconsole -v 2>/dev/null | head -1
+
+# ── Couche 3 : alias testssl.sh ──────────────────────────────────────────────
+# Le paquet Kali testssl.sh fournit le binaire /usr/bin/testssl — on crée
+# l'alias `testssl.sh` pour que le nom référencé par les profils Phantom
+# (priority_tools) soit directement exécutable par les agents.
+RUN ln -sf /usr/bin/testssl /usr/local/bin/testssl.sh \
+    && command -v testssl.sh

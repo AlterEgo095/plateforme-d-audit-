@@ -72,6 +72,13 @@ export interface RunStreamingOptions {
   env?: Record<string, string>;
   timeoutMs?: number;
   signal?: AbortSignal;
+  /**
+   * Longueur max par ligne transmise à onLine (défaut 2000 — hygiène des
+ * logs). Les adaptateurs qui doivent reconstituer un JSON final passent
+   * une limite large (voir MAX_LINE_LENGTH_HARD) et tronquent eux-mêmes
+   * la ligne avant journalisation.
+   */
+  maxLineLength?: number;
   /** Appelé pour chaque ligne émise (stdout et stderr). */
   onLine: (line: string, isErr: boolean) => void | Promise<void>;
 }
@@ -84,6 +91,15 @@ export interface RunStreamingResult {
 }
 
 const MAX_LINE_LENGTH = 2000;
+/**
+ * Plafond de sécurité par ligne quand l'appelant ne précise rien (m7 : hygiène
+ * de la base de logs). Les adaptateurs qui PARSENT la sortie (phantom — JSON
+ * final avec champs poc_script_code > 2000 caractères) doivent passer une
+ * limite large via RunStreamingOptions.maxLineLength et tronquer eux-mêmes
+ * pour l'affichage — sinon le JSON est corrompu et les constats sont perdus
+ * (« code 2 et aucun constat exploitable »).
+ */
+export const MAX_LINE_LENGTH_HARD = 1_000_000;
 
 /**
  * m7 (audit 8-a) : environnement MINIMAL transmis aux CLI d'audit. Le processus
@@ -123,6 +139,7 @@ function sanitizedEnv(extra?: Record<string, string>): NodeJS.ProcessEnv {
 /** Découpe un buffer en lignes complètes ; retourne le reste. */
 class LineBuffer {
   private buf = "";
+  constructor(private maxLineLength: number = MAX_LINE_LENGTH) {}
   push(chunk: string, onLine: (line: string) => void | Promise<void>): Promise<void> {
     this.buf += chunk;
     const parts = this.buf.split("\n");
@@ -130,14 +147,22 @@ class LineBuffer {
     return (async () => {
       for (const raw of parts) {
         const line = raw.replace(/\r$/, "");
-        await onLine(line.length > MAX_LINE_LENGTH ? line.slice(0, MAX_LINE_LENGTH) + "…" : line);
+        await onLine(
+          line.length > this.maxLineLength
+            ? line.slice(0, this.maxLineLength) + "…"
+            : line,
+        );
       }
     })();
   }
   async flush(onLine: (line: string) => void | Promise<void>): Promise<void> {
     const rest = this.buf.replace(/\r$/, "");
     this.buf = "";
-    if (rest.trim()) await onLine(rest.slice(0, MAX_LINE_LENGTH));
+    if (rest.trim()) {
+      await onLine(
+        rest.length > this.maxLineLength ? rest.slice(0, this.maxLineLength) : rest,
+      );
+    }
   }
 }
 
@@ -196,8 +221,14 @@ export async function runStreaming(opts: RunStreamingOptions): Promise<RunStream
           }, opts.timeoutMs)
         : null;
 
-    const stdoutBuf = new LineBuffer();
-    const stderrBuf = new LineBuffer();
+    const lineLimit = opts.maxLineLength ?? MAX_LINE_LENGTH;
+    if (lineLimit > MAX_LINE_LENGTH_HARD) {
+      throw new Error(
+        `maxLineLength ${lineLimit} dépasse le plafond de sécurité ${MAX_LINE_LENGTH_HARD}`,
+      );
+    }
+    const stdoutBuf = new LineBuffer(lineLimit);
+    const stderrBuf = new LineBuffer(lineLimit);
 
     const outDone = (async () => {
       child.stdout?.setEncoding("utf8");

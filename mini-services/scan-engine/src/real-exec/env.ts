@@ -66,6 +66,15 @@ export const REAL_EXEC = {
    * l'allowlist + les variables déclarées par l'adaptateur.
    */
   phantomImage: (process.env.PHANTOM_IMAGE ?? "").trim(),
+  /**
+   * Modèle LiteLLM du compresseur mémoire de Phantom (résumé du contexte).
+   * Défaut amont « DeepSeek-V3.2 » sans préfixe provider → litellm lève
+   * « LLM Provider NOT provided » à CHAQUE compression (×2400 par scan,
+   * fallback best-effort → 14.5M tokens d'input par scan). Doit être
+   * transmis EXPLICITEMENT au process phantom (voir phantom.ts), même
+   * mécanisme que PHANTOM_IMAGE. Vide = défaut amont.
+   */
+  phantomCompressorLlm: (process.env.PHANTOM_COMPRESSOR_LLM ?? "").trim(),
   /** Clé API LLM transmise aux outils. */
   llmApiKey: process.env.LLM_API_KEY ?? "",
   /** Base URL OpenAI-compatible (pont llm-bridge ou Z.ai direct). */

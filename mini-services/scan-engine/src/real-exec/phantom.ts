@@ -18,13 +18,15 @@
 
 import { REAL_EXEC } from "./env";
 import { prepareTarget } from "./git-target";
-import { probeVersion, runStreaming } from "./proc";
+import { MAX_LINE_LENGTH_HARD, probeVersion, runStreaming } from "./proc";
 import type {
   RealAdapterContext,
   RealAvailability,
   RealFinding,
   RealToolAdapter,
 } from "./types";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 
 const SEVERITIES = new Set(["critical", "high", "medium", "low", "info"]);
 
@@ -54,21 +56,131 @@ interface PhantomVuln {
 
 /** Extrait le dernier objet JSON complet imprimé sur stdout (mode --json). */
 function extractJsonOutput(stdoutTail: string): Record<string, unknown> | null {
-  const start = stdoutTail.indexOf("{");
-  if (start < 0) return null;
-  // Le JSON final est le DERNIER objet racine imprimé — on tente depuis la
-  // dernière accolade ouvrante plausible puis on laisse JSON.parse trancher.
-  for (let i = stdoutTail.length; i > start; i--) {
-    const candidate = stdoutTail.slice(start, i);
-    if (!candidate.trimEnd().endsWith("}")) continue;
-    try {
-      const parsed = JSON.parse(candidate) as Record<string, unknown>;
-      if (parsed && typeof parsed === "object" && "vulnerabilities" in parsed) return parsed;
-    } catch {
-      // on continue d'essayer des suffixes plus courts
+  // Le JSON final est le DERNIER objet racine imprimé : on part de la FIN du
+  // flux et on tente chaque paire accolade fermante/ouvrante en remontant.
+  // (L'ancienne version partait de la PREMIÈRE accolade du tampon de 400 Ko :
+  // avec des traces stderr dans la fenêtre, elle testait des candidates
+  // géantes jamais valides et finissait par retourner null — les constats
+  // étaient alors perdus, notamment avec « code 2 » quand des vulns existent.)
+  for (let end = stdoutTail.length; end > 1; end--) {
+    if (stdoutTail.charCodeAt(end - 1) !== 125) continue; // "}"
+    for (let start = end - 1; start >= 0; start--) {
+      if (stdoutTail.charCodeAt(start) !== 123) continue; // "{"
+      try {
+        const parsed = JSON.parse(stdoutTail.slice(start, end)) as Record<string, unknown>;
+        if (parsed && typeof parsed === "object" && "vulnerabilities" in parsed) return parsed;
+      } catch {
+        // fragment invalide (accolade imbriquée, bruit stderr) — on remonte
+      }
     }
   }
   return null;
+}
+
+/* ── Fallback de récupération : répertoire de run de Phantom ─────────────
+ * Phantom écrit parallèlement au stdout : phantom_runs/<run>/vulnerabilities.csv
+ * + vulnerabilities/vuln-XXXX.md (description, analyse, PoC). Si le JSON final
+ * est illisible (sortie tronquée, crash en fin de CLI), les constats sont
+ * reconstruits depuis ces fichiers — robustes par construction.
+ * ───────────────────────────────────────────────────────────────────────*/
+
+/** Éclate une ligne CSV en cellules (guillemets doublés gérés). */
+function splitCsvLine(line: string): string[] {
+  const out: string[] = [];
+  let cur = "";
+  let inQuotes = false;
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i];
+    if (inQuotes) {
+      if (c === '"') {
+        if (line[i + 1] === '"') {
+          cur += '"';
+          i++;
+        } else inQuotes = false;
+      } else cur += c;
+    } else if (c === '"') inQuotes = true;
+    else if (c === ",") {
+      out.push(cur);
+      cur = "";
+    } else cur += c;
+  }
+  out.push(cur);
+  return out;
+}
+
+/** Section « ## <header> » d'un rapport markdown de vulnérabilité. */
+function mdSection(md: string, header: string): string {
+  const re = new RegExp(`^##\\s+${header}\\s*$`, "mi");
+  const m = re.exec(md);
+  if (!m) return "";
+  const rest = md.slice(m.index + m[0].length);
+  const next = rest.search(/^##\\s+/m);
+  return (next >= 0 ? rest.slice(0, next) : rest).trim();
+}
+
+/** Valeur d'une ligne « **<Label>:** valeur » d'un rapport markdown. */
+function mdMeta(md: string, label: string): string {
+  const m = new RegExp(`\\*\\*${label}:\\*\\*\\s*([^\\n]+)`, "i").exec(md);
+  return m ? m[1].trim() : "";
+}
+
+function mapRunDirConfidence(raw: string): RealFinding["confidence"] {
+  const v = raw.toLowerCase();
+  if (v === "confirmed") return "CONFIRMED";
+  if (v === "false_positive" || v === "mitigated") return "UNVERIFIED";
+  return "PROBABLE";
+}
+
+function findingsFromRunDir(workdir: string): RealFinding[] {
+  try {
+    const runsDir = join(workdir, "phantom_runs");
+    if (!existsSync(runsDir)) return [];
+    const findings: RealFinding[] = [];
+    for (const run of readdirSync(runsDir)) {
+      const runDir = join(runsDir, run);
+      const csvPath = join(runDir, "vulnerabilities.csv");
+      if (!existsSync(csvPath)) continue;
+      const lines = readFileSync(csvPath, "utf8")
+        .split(/\r?\n/)
+        .filter((l) => l.trim());
+      if (lines.length < 2) continue;
+      const header = splitCsvLine(lines[0]).map((h) => h.trim());
+      for (const line of lines.slice(1)) {
+        const cells = splitCsvLine(line);
+        const row: Record<string, string> = {};
+        header.forEach((h, i) => {
+          row[h] = (cells[i] ?? "").trim();
+        });
+        const mdPath = row.file ? join(runDir, row.file) : "";
+        const md = mdPath && existsSync(mdPath) ? readFileSync(mdPath, "utf8") : "";
+        const confidence = mapRunDirConfidence(row.confidence);
+        const cvssTxt = row.cvss || mdMeta(md, "CVSS");
+        const cvss = cvssTxt ? Number.parseFloat(cvssTxt) : NaN;
+        const locBits = [row.method, `${row.target ?? ""}${row.endpoint ?? ""}`].filter(Boolean);
+        const param = row.parameter ? ` (paramètre : ${row.parameter})` : "";
+        const description =
+          [mdSection(md, "Description"), mdSection(md, "Impact")].filter(Boolean).join("\n\n") ||
+          "(description disponible dans le rapport markdown du run)";
+        findings.push({
+          title: row.title || row.id || "Constat Phantom",
+          severity: mapSeverity(row.severity),
+          confidence,
+          category: mdMeta(md, "CWE") || "web",
+          cve: null,
+          cvss: Number.isFinite(cvss) ? cvss : null,
+          location: locBits.length ? locBits.join(" ") + param : undefined,
+          description,
+          evidence: mdSection(md, "Technical Analysis") || "(aucune preuve détaillée fournie par l'outil)",
+          poc: mdSection(md, "Proof of Concept") || undefined,
+          sentinelTriggered: confidence === "CONFIRMED",
+          remediation: mdSection(md, "Remediation") || mdSection(md, "Remédiation") || undefined,
+        });
+      }
+    }
+    return findings;
+  } catch {
+    return [];
+  }
 }
 
 export class PhantomAdapter implements RealToolAdapter {
@@ -119,6 +231,11 @@ export class PhantomAdapter implements RealToolAdapter {
       cwd: ctx.workdir,
       timeoutMs: REAL_EXEC.timeoutMinutes * 60_000,
       signal: ctx.signal,
+      // Ligne NON tronquée à 2000 : le JSON final contient des champs
+      // (poc_script_code, evidence…) bien plus longs — la troncature
+      // corrompait le JSON et perdait TOUS les constats. L'affichage reste
+      // tronqué côté onLog (voir onLine ci-dessous).
+      maxLineLength: MAX_LINE_LENGTH_HARD,
       env: {
         // LLM via LiteLLM — pont Z.ai ou endpoint OpenAI-compatible direct
         PHANTOM_LLM: REAL_EXEC.phantomLlm,
@@ -135,11 +252,23 @@ export class PhantomAdapter implements RealToolAdapter {
         // sur son image amont. Chaîne vide exclue : Config.get() retournerait
         // "" (falsy) → phantom lèverait « PHANTOM_IMAGE must be configured ».
         ...(REAL_EXEC.phantomImage ? { PHANTOM_IMAGE: REAL_EXEC.phantomImage } : {}),
+        // Compresseur mémoire (voir env.ts) : sans cette ligne, phantom
+        // retombe sur son défaut amont « DeepSeek-V3.2 » (sans préfixe
+        // provider) → « LLM Provider NOT provided » à chaque compression.
+        ...(REAL_EXEC.phantomCompressorLlm
+          ? { PHANTOM_COMPRESSOR_LLM: REAL_EXEC.phantomCompressorLlm }
+          : {}),
       },
       onLine: async (line, isErr) => {
         if (!line.trim()) return;
+        // stdoutAll conserve la ligne ENTIÈRE (parsing du JSON final) ;
+        // la journalisation affiche une version tronquée (hygiène m7).
         stdoutAll = (stdoutAll + line + "\n").slice(-400_000); // fenêtre glissante
-        await ctx.onLog(line, isErr ? "WARN" : "TOOL", "phantom");
+        await ctx.onLog(
+          line.length > 2000 ? line.slice(0, 2000) + "…" : line,
+          isErr ? "WARN" : "TOOL",
+          "phantom",
+        );
         for (const [re, phase, pct] of phasePatterns) {
           if (phase !== lastPhase && re.test(line)) {
             lastPhase = phase;
@@ -157,12 +286,7 @@ export class PhantomAdapter implements RealToolAdapter {
       ? (parsed!.vulnerabilities as PhantomVuln[])
       : [];
 
-    if (vulns.length === 0 && result.exitCode !== 0) {
-      throw new Error(`Phantom a terminé avec le code ${result.exitCode} et aucun constat exploitable`);
-    }
-
-    await ctx.onPhase("RAPPORT", 96);
-    const findings: RealFinding[] = vulns.map((v) => {
+    let findings: RealFinding[] = vulns.map((v) => {
       const meta = (v.metadata ?? {}) as Record<string, unknown>;
       const evidence = Array.isArray(v.evidence) ? v.evidence.filter((e) => typeof e === "string") : [];
       const cvssRaw = meta.cvss ?? meta.cvss_score ?? meta.cvss3_score;
@@ -189,6 +313,29 @@ export class PhantomAdapter implements RealToolAdapter {
         remediation: v.remediation ?? undefined,
       };
     });
+
+    // Code de sortie 2 = convention amont de phantom (des vulnérabilités ont
+    // été rapportées — voir interface/main.py sys.exit(2)). Si le JSON final
+    // est illisible alors que le code est non nul (ou absent), on tente la
+    // récupération depuis le répertoire de run AVANT de déclarer l'échec :
+    // un scan de 50 min ne doit jamais perdre ses constats.
+    if (findings.length === 0 && (result.exitCode !== 0 || !parsed)) {
+      const recovered = findingsFromRunDir(ctx.workdir);
+      if (recovered.length > 0) {
+        findings = recovered;
+        await ctx.onLog(
+          `JSON final illisible (code ${result.exitCode}) — ${recovered.length} constat(s) récupéré(s) depuis le répertoire de run (vulnerabilities.csv + .md)`,
+          "WARN",
+          "phantom",
+        );
+      } else if (result.exitCode !== 0) {
+        throw new Error(
+          `Phantom a terminé avec le code ${result.exitCode} et aucun constat exploitable (JSON final illisible, répertoire de run sans vulnerabilities.csv)`,
+        );
+      }
+    }
+
+    await ctx.onPhase("RAPPORT", 96);
 
     await ctx.onLog(
       `Phantom terminé (code ${result.exitCode}) — ${findings.length} constat(s) normalisé(s)`,

@@ -1,51 +1,76 @@
 # ── AuditForge — image sandbox Kali enrichie pour Phantom ───────────────────
 # Basée sur l'image officielle ghcr.io/usta0x001/phantom-sandbox:latest
-# (Kali Rolling 2025.4 + Caido + tool server) : l'entrypoint, l'utilisateur
-# `pentester` et la configuration proxy Caido sont hérités tels quels.
+# (Kali Rolling + Caido + tool server) : l'entrypoint, l'utilisateur et la
+# configuration proxy Caido sont hérités tels quels.
 #
 # Utilisation : construire puis référencer dans le .env du moteur :
 #   docker build -f Dockerfile.sandbox -t auditforge/phantom-sandbox-plus:latest .
 #   PHANTOM_IMAGE=auditforge/phantom-sandbox-plus:latest
-# (Config.get("phantom_image") lit l'env PHANTOM_IMAGE en priorité —
-#  voir phantom/config/config.py ; passer la variable au service `engine`
-#  via docker-compose.yml.)
+# (la variable est transmise explicitement au process phantom par
+#  mini-services/scan-engine/src/real-exec/{env,phantom}.ts — sanitizedEnv()
+#  (audit m7) ne forward que l'allowlist + les vars déclarées par l'adaptateur).
+#
+# ⚠ LEÇON v2 (incident 2026-10-27) : sur Kali Rolling, un simple
+# `apt-get install` peut upgrader python3 (3.13 → 3.14). Or le tool server de
+# la sandbox tourne dans /app/venv, un venv BÂTI POUR python3.13 : après
+# upgrade, l'interpréteur cherche ses modules dans lib/python3.14/site-packages
+# (absent) → « No module named uvicorn » → « Tool server failed to start » →
+# tous les scans échouent en ~144 s. D'où : verrouillage dpkg de TOUS les
+# paquets python AVANT apt, fallback pip/git pour les outils python, et un
+# HEALTH-CHECK du venv en fin de build (échec de build plutôt qu'en prod).
 
 FROM ghcr.io/usta0x001/phantom-sandbox:latest
 
-# ── Couche 1 : outils web ciblés (léger, ~500 Mo) ───────────────────────────
-# Installation un-par-un : un paquet absent ne casse pas la couche entière
-# (les dépôts Kali Rolling bougent) ; l'inventaire en fin de couche rend
-# l'absence visible dans le log de build.
-#   commix     — injection de commandes OS (série RCE)
-#   xsstrike   — XSS avancé (DOM, mutation, blind)
-#   nikto      — scanner de serveur web (déjà cité par les profils Phantom)
-#   whatweb    — fingerprinting web (technos, CMS, headers)
-#   gobuster   — énumération répertoires / vhosts / DNS
-#   dirb       — énumération répertoires (wordlists intégrées)
-#   wfuzz      — fuzzer web paramétrable
-#   testssl.sh — audit TLS/SSL détaillé (ciphers, protocoles, ACME…)
-#   sslscan    — audit TLS rapide
-#   hydra      — brute-force d'authentification (HTTP forms, SSH…)
-#   wafw00f    — détection et fingerprint de WAF
-#   dalfox     — scanner XSS paramétré (pipelines URL/params)
-#   seclists   — wordlists de référence (utilisées par ffuf/gobuster/dirb)
+# ── Couche 0 : VERROU Python (critique — voir avertissement ci-dessus) ──────
+# dpkg hold sur l'intégralité de la stack python installée : apt refusera de
+# les upgrader/supprimer. Les paquets qui l'exigeraient échoueront (log « !! »)
+# et seront couverts par la couche pip/git 1b.
 RUN apt-get update -y \
-    && for p in commix xsstrike nikto whatweb gobuster dirb wfuzz \
-                testssl.sh sslscan hydra wafw00f dalfox seclists; do \
+    && apt-mark hold $(dpkg --get-selections \
+         | awk '$1 ~ /^python3($|\.|-)|^libpython3/ {print $1}') 2>/dev/null || true
+
+# ── Couche 1 : outils web ciblés (installation résiliente un-par-un) ────────
+#   nikto      — scanner de serveur web (perl)   | whatweb  — fingerprint (ruby)
+#   gobuster   — enum dirs/vhosts/DNS (go)       | dirb     — enum dirs (c)
+#   testssl.sh — audit TLS détaillé (bash)       | sslscan  — audit TLS (c)
+#   hydra      — brute-force auth (c)            | seclists — wordlists (data)
+#   dalfox     — scanner XSS (go)
+#   commix, xsstrike, wafw00f — python : tenteront apt, sinon couche 1b
+#   (wfuzz absent volontairement : pycurl non constructible dans ce contexte
+#    et doublon de dirb/gobuster/ffuf/dirsearch déjà présents.)
+RUN for p in commix xsstrike nikto whatweb gobuster dirb wfuzz \
+             testssl.sh sslscan hydra wafw00f dalfox seclists; do \
          apt-get install -y --no-install-recommends "$p" \
-           || echo "!! paquet indisponible dans les dépôts: $p"; \
+           || echo "!! paquet indisponible (python verrouillé ?): $p"; \
        done \
     && rm -rf /var/lib/apt/lists/* \
-    && echo "=== Inventaire des outils ajoutés (couche 1) ===" \
+    && echo "=== Inventaire couche 1 ===" \
     && for t in commix xsstrike nikto whatweb gobuster dirb wfuzz \
                 testssl.sh sslscan hydra wafw00f dalfox; do \
          printf '%-12s %s\n' "$t" "$(command -v "$t" || echo ABSENT)"; \
        done
 
+# ── Couche 1b : rattrapage des outils python refusés par le verrou ──────────
+# pip système (3.13, PEP 668 → --break-system-packages) pour les paquets PyPI,
+# git pour commix/XSStrike (pas sur PyPI). Conditionnels : n'écrasent pas une
+# installation apt réussie. Déps runtime : requests (les deux).
+RUN PYPIP="python3 -m pip install --break-system-packages --no-cache-dir" ; \
+    command -v wfuzz   >/dev/null || $PYPIP wfuzz   2>/dev/null || echo "!! wfuzz non installé" ; \
+    command -v wafw00f >/dev/null || $PYPIP wafw00f 2>/dev/null || echo "!! wafw00f non installé" ; \
+    command -v xsstrike >/dev/null || ( \
+         git clone --depth 1 https://github.com/s0md3v/XSStrike /opt/XSStrike \
+         && ln -sf /opt/XSStrike/xsstrike.py /usr/local/bin/xsstrike \
+         && chmod +x /opt/XSStrike/xsstrike.py ) ; \
+    command -v commix >/dev/null || ( \
+         git clone --depth 1 https://github.com/commixproject/commix /opt/commix \
+         && ln -sf /opt/commix/commix.py /usr/local/bin/commix \
+         && chmod +x /opt/commix/commix.py ) ; \
+    $PYPIP requests 2>/dev/null || true ; \
+    command -v xsstrike >/dev/null && echo "xsstrike OK" ; command -v commix >/dev/null && echo "commix OK"
+
 # ── Couche 2 : Metasploit Framework (lourd, ~2-3 Go décompressés) ───────────
-# Exploitation (msfconsole / msfvenom) — utile en profil DEEP quand la
-# reconnaissance révèle des services réseau exploitables (pas seulement web).
-# Échec volontaire du build si l'installation échoue (visible dans le log).
+# Exploitation (msfconsole / msfvenom) — utile en profil DEEP pour des services
+# réseau exploitables. Ruby : aucun conflit avec le verrou python.
 RUN apt-get update -y \
     && apt-get install -y --no-install-recommends metasploit-framework \
     && rm -rf /var/lib/apt/lists/* \
@@ -57,3 +82,14 @@ RUN apt-get update -y \
 # (priority_tools) soit directement exécutable par les agents.
 RUN ln -sf /usr/bin/testssl /usr/local/bin/testssl.sh \
     && command -v testssl.sh
+
+# ── Couche 4 : HEALTH-CHECK du venv du tool server (GARDE-FOU) ──────────────
+# Le critère de production réelle : l'entrypoint lance le tool server avec
+# /app/venv/bin/python — c'est l'absence d'uvicorn/fastapi DANS LE VENV qui a
+# tué les scans v2 (python upgradé derrière le dos de apt). On vérifie donc
+# exactement cela, plus la présence du script du tool server. (Un import
+# complet de phantom.runtime.tool_server exige cwd=/app + env complet —
+# trop fragile pour un garde-fou de build.)
+RUN /app/venv/bin/python -c "import uvicorn, fastapi; print('venv tool server OK — uvicorn', uvicorn.__version__)" \
+    && test -f /app/phantom/runtime/tool_server.py \
+    && echo "tool_server.py présent"

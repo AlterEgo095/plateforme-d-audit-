@@ -57,6 +57,15 @@ export const REAL_EXEC = {
 
   /** Modèle LiteLLM transmis à Phantom (format provider/model). */
   phantomLlm: process.env.PHANTOM_LLM ?? "openai/glm-4.6",
+  /**
+   * Image Docker de la sandbox Kali de Phantom (défaut amont :
+   * ghcr.io/usta0x001/phantom-sandbox:latest — variante enrichie :
+   * auditforge/phantom-sandbox-plus). Vide = défaut amont.
+   * ATTENTION : doit être transmis EXPLICITEMENT dans l'env du process
+   * phantom (voir phantom.ts) — sanitizedEnv() (m7) ne forward que
+   * l'allowlist + les variables déclarées par l'adaptateur.
+   */
+  phantomImage: (process.env.PHANTOM_IMAGE ?? "").trim(),
   /** Clé API LLM transmise aux outils. */
   llmApiKey: process.env.LLM_API_KEY ?? "",
   /** Base URL OpenAI-compatible (pont llm-bridge ou Z.ai direct). */

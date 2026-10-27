@@ -128,6 +128,13 @@ export class PhantomAdapter implements RealToolAdapter {
         PYTHONUNBUFFERED: "1",
         // les scans Phantom créent leur dossier de runs dans le cwd
         PHANTOM_TELEMETRY: "false",
+        // Sandbox Kali éventuellement enrichie (PHANTOM_IMAGE, voir env.ts).
+        // Transmission EXPLICITE obligatoire : sanitizedEnv() (audit m7)
+        // ne forward que l'allowlist système vers les CLI d'audit — sans
+        // cette ligne, phantom ignore l'env du conteneur moteur et retombe
+        // sur son image amont. Chaîne vide exclue : Config.get() retournerait
+        // "" (falsy) → phantom lèverait « PHANTOM_IMAGE must be configured ».
+        ...(REAL_EXEC.phantomImage ? { PHANTOM_IMAGE: REAL_EXEC.phantomImage } : {}),
       },
       onLine: async (line, isErr) => {
         if (!line.trim()) return;

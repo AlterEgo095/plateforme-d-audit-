@@ -322,16 +322,7 @@ export class DeepAuditAdapter implements RealToolAdapter {
       }
       const ready = await this.waitReady(ctx, 30_000);
       if (!ready) throw new Error("Sandbox DeepAudit non opérationnelle après 30 s (docker exec en échec)");
-      await ctx.onLog(`Sandbox prête (${this.container}) — 25+ outils offensifs disponibles`, "SUCCESS", "deepaudit");
-
-      // Préparation des outils : le binaire nmap de l'image porte des file
-      // capabilities (cap_net_admin/raw=eip) que l'environnement conteneur
-      // refuse → execve EPERM. Une COPIE du binaire perd les caps mais
-      // s'exécute correctement (nmap retombe sur un scan connect).
-      const nmapFix = await this.dockerCapture(
-        ["exec", this.container, "sh", "-c", "cp /usr/lib/nmap/nmap /tmp/nmap-real 2>/dev/null && chmod +x /tmp/nmap-real"],
-        10_000,
-      );
+      await ctx.onLog(`Sandbox prête (${this.container}) — 25+ outils offensifs disponibles (nmap: NET_RAW)`, "SUCCESS", "deepaudit");
 
       // ── Garde-fou anti-faux « 0 vulnérabilité » : la cible doit répondre. ──
       // Un scan sur une cible injoignable rapporterait 0 constat SANS que ce
@@ -363,7 +354,7 @@ export class DeepAuditAdapter implements RealToolAdapter {
       // ── Phase 1 : RECONNAISSANCE ──
       await ctx.onPhase("RECONNAISSANCE", 8);
       const scanTarget = new URL(activeOrigin);
-      const recon = await this.phaseRecon(ctx, scanTarget, profile, clock, nmapFix.code === 0 ? "/tmp/nmap-real" : "nmap");
+      const recon = await this.phaseRecon(ctx, scanTarget, profile, clock);
       await ctx.onLog(
         `Recon terminée : ${recon.endpoints.length} endpoint(s), ${recon.params.size} paramètre(s), ` +
         `${recon.forms.length} formulaire(s), ${recon.ports.length} port(s) ouvert(s)` +
@@ -408,7 +399,6 @@ export class DeepAuditAdapter implements RealToolAdapter {
     target: URL,
     profile: Profile,
     clock: PhaseClock,
-    nmapBin: string,
   ): Promise<ReconResult> {
     const recon: ReconResult = {
       endpoints: [target.origin + (target.pathname === "/" ? "/" : target.pathname)],
@@ -438,6 +428,13 @@ export class DeepAuditAdapter implements RealToolAdapter {
       recon.cookies.push(set);
     }
 
+    // 1bis. Moisson de liens — filet anti-« crawl vide ». katana/ffuf peuvent
+    // échouer silencieusement (site lent, calibration, parse) alors que le HTML
+    // de la page d'accueil contient presque toujours des liens vers les
+    // fonctionnalités (ex. showforum.asp?id=0) : on extrait href/src/action
+    // pour alimenter endpoints + paramètres (cibles sqlmap/dalfox).
+    this.harvestLinks(page.body, target, recon);
+
     // 2. whatweb
     const ww = await this.execTool(ctx, ["whatweb", "-a", "1", "-q", "--no-errors", target.origin], {
       timeoutMs: clock.left(60_000), label: "whatweb (empreinte technique)",
@@ -451,20 +448,22 @@ export class DeepAuditAdapter implements RealToolAdapter {
     const wafMatch = /is behind (.+?)(?:\s*$|\s\()/im.exec(waf.stdout);
     if (wafMatch) recon.waf = wafMatch[1].trim();
 
-    // 4. Crawling (katana — -fs dn : scope domaine racine)
+    // 4. Crawling (katana)
     const crawlDepth = deep ? "4" : std ? "3" : "1";
     const crawl = await this.execTool(
       ctx,
       ["katana", "-u", target.origin, "-d", crawlDepth, "-jc", "-silent", "-kf", "all",
-       "-timeout", "10", "-c", "10", "-fs", "dn"],
+       "-timeout", "10", "-c", "10", "-fs", "dnb"],
       { timeoutMs: clock.left(deep ? 240_000 : 150_000), label: `katana -d ${crawlDepth} (crawl + JS)`, maxLines: 400 },
     );
     for (const line of crawl.stdout.split("\n")) {
       let url = line.trim();
       try {
-        const j = JSON.parse(url) as { endpoint?: string };
-        if (j.endpoint) url = String(j.endpoint);
-      } catch { /* sortie non-JSON */ }
+        // katana -jc émet {"request":{"endpoint":"http://…"},…} — le endpoint
+        // est IMBRIQUÉ, pas à la racine (bug v2 : 0 URL extraite → recon aveugle).
+        const j = JSON.parse(url) as { endpoint?: string; url?: string; request?: { endpoint?: string } };
+        url = String(j.request?.endpoint ?? j.endpoint ?? j.url ?? url);
+      } catch { /* sortie non-JSON : URL brute */ }
       if (!/^https?:\/\//i.test(url)) continue;
       try {
         const u = new URL(url);
@@ -502,26 +501,29 @@ export class DeepAuditAdapter implements RealToolAdapter {
     }
     recon.endpoints = [...new Set(recon.endpoints)];
 
-    // 7. Fuzzing de répertoires (ffuf)
+    // 7. Fuzzing de répertoires (ffuf) — extensions guidées par la techno
+    // détectée (IIS/ASP → .asp/.aspx, Java → .jsp, PHP → .php) sinon les
+    // pages dynamiques (.asp…) du mot-cadre common.txt sont manquées.
     const wordlist = await this.pickWordlist(ctx, std);
+    const exts = [".html", ".txt"];
+    if (/asp/i.test(recon.tech)) exts.unshift(".asp", ".aspx");
+    else if (/jsp/i.test(recon.tech)) exts.unshift(".jsp");
+    else if (/php/i.test(recon.tech)) exts.unshift(".php");
     const ff = await this.execTool(
       ctx,
       ["ffuf", "-u", `${target.origin}/FUZZ`, "-w", wordlist, "-mc",
-       "200,201,204,301,302,307,401,403,405", "-t", "30", "-timeout", "8",
-       "-s", "-of", "csv", "-o", "/tmp/ffuf.csv"],
-      { timeoutMs: clock.left(std ? 600_000 : 180_000), label: `ffuf (fuzzing répertoires, ${wordlist})`, maxLines: 120 },
+       "200,201,204,301,302,307,401,403,405", "-ac", "-e", exts.join(","),
+       "-t", "30", "-timeout", "8", "-s", "-of", "csv", "-o", "/tmp/ffuf.csv"],
+      { timeoutMs: clock.left(std ? 600_000 : 180_000), label: `ffuf (fuzzing répertoires, ${wordlist}, ext ${exts.join(",")})`, maxLines: 120 },
     );
     if (ff.code === 0 || ff.code === 1) {
       const csv = await this.execTool(ctx, ["cat", "/tmp/ffuf.csv"], { timeoutMs: 15_000, label: "ffuf résultats", maxLines: 200 });
-      const rows = csv.stdout.split("\n").filter((r) => r.trim());
-      // Entête ffuf : FUZZ,url,redirectlocation,position,status_code,… — la
-      // colonne « url » est repérée dynamiquement (elle varie selon versions).
-      const header = (rows[0] ?? "").split(",").map((c) => c.replace(/^"|"$/g, "").trim().toLowerCase());
-      const urlCol = header.indexOf("url");
-      for (const row of rows.slice(1)) {
+      for (const row of csv.stdout.split("\n").slice(1)) {
+        // Colonnes ffuf CSV : FUZZ,url,redirectlocation,positionstatus,… —
+        // la colonne 0 est le MOT testé, pas l'URL (bug v2/v3 : résultats ignorés).
         const cells = row.split(",").map((c) => c.replace(/^"|"$/g, "").trim());
-        const url = (urlCol >= 0 ? cells[urlCol] : cells[1]) ?? "";
-        if (/^https?:\/\//i.test(url)) recon.endpoints.push(url);
+        const url = cells.find((c) => /^https?:\/\//i.test(c));
+        if (url) recon.endpoints.push(url);
       }
       recon.endpoints = [...new Set(recon.endpoints)];
     }
@@ -537,14 +539,32 @@ export class DeepAuditAdapter implements RealToolAdapter {
       }
     }
 
-    // 9. Ports (nmap — binaire recopié si les file caps bloquaient l'exec)
+    // 9. Ports (nmap)
+    // L'image sandbox embarque nmap avec file capabilities (cap_net_raw=ep) sur
+    // /usr/lib/nmap/nmap : si la bounding set du conteneur ne contient pas
+    // NET_RAW, execve échoue en EPERM (« Operation not permitted ») AVANT tout
+    // scan. Correctif : setcap -r + copie sans caps (les xattrs ne survivent
+    // pas à cp), puis scan en mode non-privilégié (-sT --unprivileged).
     if (std) {
-      const nm = await this.execTool(
+      await this.execTool(ctx, ["bash", "-lc",
+        "setcap -r /usr/lib/nmap/nmap 2>/dev/null; cp /usr/lib/nmap/nmap /tmp/.nmap-plain 2>/dev/null; chmod 755 /tmp/.nmap-plain 2>/dev/null; true"], {
+        timeoutMs: 20_000, label: "nmap préparation (retrait file caps)", maxLines: 10,
+      });
+      const portCount = deep ? "1000" : "500";
+      let nm = await this.execTool(
         ctx,
-        [nmapBin, "-Pn", "-T4", "--top-ports", deep ? "1000" : "500", "-sT", "-sV", "--version-light",
+        ["nmap", "-Pn", "-T4", "--unprivileged", "-sT", "--top-ports", portCount, "-sV", "--version-light",
          "--open", "-oN", "/tmp/nmap.txt", target.hostname],
-        { timeoutMs: clock.left(deep ? 720_000 : 420_000), label: `nmap (--top-ports ${deep ? 1000 : 500} -sV)`, maxLines: 200 },
+        { timeoutMs: clock.left(deep ? 720_000 : 420_000), label: `nmap (--top-ports ${portCount} -sT -sV)`, maxLines: 200 },
       );
+      if (/Operation not permitted/i.test(`${nm.stderr ?? ""}${nm.stdout}`)) {
+        // Repli : binaire copié sans file caps, sans détection de version.
+        nm = await this.execTool(
+          ctx,
+          ["bash", "-lc", `/tmp/.nmap-plain -Pn -T4 --unprivileged -sT --top-ports ${portCount} --open -oN /tmp/nmap.txt ${target.hostname}`],
+          { timeoutMs: clock.left(300_000), label: "nmap repli (-sT sans caps)", maxLines: 200 },
+        );
+      }
       for (const m of nm.stdout.matchAll(/^\s*(\d+\/(?:tcp|udp))\s+open\s+(\S+)(?:\s+(.*))?$/gm)) {
         recon.ports.push({ port: m[1], service: m[2], version: (m[3] ?? "").trim() });
       }
@@ -712,6 +732,8 @@ export class DeepAuditAdapter implements RealToolAdapter {
     for (const t of sqlTargets) {
       if (clock.remainingMs() < 60_000) break;
       sqlIdx += 1;
+      // NB : pas de --no-color — absent de certaines versions de sqlmap
+      // (v2 : les 5 runs mouraient instantanément sur cette option).
       const args = ["sqlmap", "-u", t.url, "--batch", "--threads", "4", "--time-sec", "3",
         "--timeout", "25", "--retries", "1", "--flush-session",
         "--level", profile === "DEEP" ? "3" : std ? "2" : "1",
@@ -749,7 +771,9 @@ export class DeepAuditAdapter implements RealToolAdapter {
     for (const t of xssTargets) {
       if (clock.remainingMs() < 45_000) break;
       xssIdx += 1;
-      const dl = await this.execTool(ctx, ["dalfox", "url", t.url, "--silence", "--no-color", "--no-spinner", "--timeout", "15"], {
+      // NB : pas de --no-spinner — argument inconnu de cette version de dalfox
+      // (v2 : les 4 runs mouraient sur « unexpected argument »).
+      const dl = await this.execTool(ctx, ["dalfox", "url", t.url, "--silence", "--no-color", "--timeout", "15"], {
         timeoutMs: clock.left(300_000), label: `dalfox #${xssIdx} (${t.url.slice(0, 70)})`, maxLines: 120,
       });
       for (const line of dl.stdout.split("\n")) {
@@ -777,7 +801,7 @@ export class DeepAuditAdapter implements RealToolAdapter {
       for (const t of cmdTargets) {
         if (clock.remainingMs() < 45_000) break;
         ci += 1;
-        const cx = await this.execTool(ctx, ["commix", "--batch", "--url", t.url, "--no-color"], {
+        const cx = await this.execTool(ctx, ["commix", "--batch", "--url", t.url], {
           timeoutMs: clock.left(480_000), label: `commix #${ci} (${t.url.slice(0, 70)})`, maxLines: 120,
         });
         if (/Command(?:s)? that can be injected|'[\w\-]+' is vulnerable/i.test(cx.stdout)) {
@@ -796,28 +820,30 @@ export class DeepAuditAdapter implements RealToolAdapter {
       }
     }
 
-    // 3.5 nikto (STANDARD/DEEP) — parsing du STDOUT (« + [id] chemin : desc »),
-    //     le format CSV variant trop selon les versions.
+    // 3.5 nikto (STANDARD/DEEP)
     if (std && clock.remainingMs() > 120_000) {
-      const nk = await this.execTool(ctx, ["nikto", "-h", target.origin, "-timeout", "20"], {
-        timeoutMs: clock.left(780_000), label: "nikto (scan serveur web)", maxLines: 120,
+      const nk = await this.execTool(ctx, ["nikto", "-h", target.origin, "-Format", "csv", "-o", "/tmp/nikto.csv", "-timeout", "20"], {
+        timeoutMs: clock.left(780_000), label: "nikto (scan serveur web)", maxLines: 80,
       });
-      for (const line of nk.stdout.split("\n")) {
-        const m = /^\+\s+\[(\d+)\]\s+(\S+?):\s+(.+)$/.exec(line.trim());
-        if (!m) continue;
-        const [, ref, path, desc] = m;
-        if (/Nikto test completed|statistics|tokens? retrieved/i.test(desc)) continue;
-        push({
-          id: `nikto-${ref}-${out.length}`,
-          tool: "nikto",
-          title: `Nikto : ${desc.slice(0, 180)}`,
-          category: "misc",
-          severity: /admin|config|backup|password|shell|phpinfo|RFC-1918|internal IP/i.test(desc) ? "MEDIUM" : "LOW",
-          toolVerified: false,
-          location: target.origin + path,
-          description: `${desc} (référence nikto ${ref})`,
-          evidence: line.trim().slice(0, 2000),
-        });
+      if (nk.code === 0 || nk.code === 1) {
+        const csv = await this.execTool(ctx, ["cat", "/tmp/nikto.csv"], { timeoutMs: 15_000, label: "nikto résultats", maxLines: 300 });
+        for (const row of csv.stdout.split("\n").slice(1)) {
+          const cols = row.split(",").map((c) => c.replace(/^"|"$/g, "").trim());
+          if (cols.length < 4 || !cols[1] || cols[1] === "OSVDB-0") continue;
+          const desc = cols[3] ?? cols[1];
+          if (/Nikto test completed|No HTTP\(S\)|statistics|tokens? retrieved/i.test(desc)) continue;
+          push({
+            id: `nikto-${out.length}`,
+            tool: "nikto",
+            title: `Nikto : ${cols[1]} ${cols[2] ?? ""}`.trim().slice(0, 200),
+            category: "misc",
+            severity: /admin|config|backup|password|shell|phpinfo/i.test(desc) ? "MEDIUM" : "LOW",
+            toolVerified: false,
+            location: target.origin + (cols[2] ?? ""),
+            description: desc,
+            evidence: row.slice(0, 2000),
+          });
+        }
       }
     }
     await ctx.onPhase("EXPLOITATION", 70);
@@ -1295,16 +1321,26 @@ export class DeepAuditAdapter implements RealToolAdapter {
     args.push(url);
     const r = await this.execTool(ctx, args, { timeoutMs: clock.left(timeoutMs + 8_000), label: `curl ${method} ${url.slice(0, 60)}` });
     const raw = r.stdout;
-    const sep = raw.indexOf("\r\n\r\n");
+    // NB : runStreaming réassemble les lignes en \n (les \r finals sont
+    // retirés par LineBuffer) — le séparateur \r\n\r\n n'existe donc plus.
+    // Bug v2/v3 : sep=-1 → body="" → recon aveugle (0 lien, 0 formulaire).
+    let sep = raw.indexOf("\r\n\r\n");
+    let sepLen = 4;
+    if (sep < 0) {
+      sep = raw.indexOf("\n\n");
+      sepLen = 2;
+    }
     const head = sep >= 0 ? raw.slice(0, sep) : raw;
-    const bodyText = sep >= 0 ? raw.slice(sep + 4) : "";
-    const statusMatch = /HTTP\/[\d.]+\s+(\d{3})/.exec(head);
+    const bodyText = sep >= 0 ? raw.slice(sep + sepLen) : "";
+    // Dernier bloc status (curl -i peut émettre un 100-continue préliminaire).
+    let status = 0;
+    for (const m of head.matchAll(/HTTP\/[\d.]+\s+(\d{3})/g)) status = Number(m[1]);
     const headers: Record<string, string> = {};
     for (const line of head.split(/\r?\n/).slice(1)) {
       const idx = line.indexOf(":");
       if (idx > 0) headers[line.slice(0, idx).trim().toLowerCase()] = line.slice(idx + 1).trim();
     }
-    return { status: statusMatch ? Number(statusMatch[1]) : 0, headers, body: bodyText.slice(0, 40_000) };
+    return { status, headers, body: bodyText.slice(0, 40_000) };
   }
 
   /** Parse les Set-Cookie d'une réponse (nom + attributs). */
@@ -1317,7 +1353,32 @@ export class DeepAuditAdapter implements RealToolAdapter {
     return out;
   }
 
-  /** Extraction naïve des formulaires HTML (action, method, champs). */
+  /**
+   * Moissonne les liens (href/src/action) d'une page HTML et alimente
+   * recon.endpoints / recon.params. Filet de sécurité de la recon : garantit
+   * une surface d'attaque même si katana/ffuf ne renvoient rien.
+   */
+  private harvestLinks(html: string, target: URL, recon: ReconResult): void {
+    if (!html) return;
+    const attrRe = /(?:href|src|action)\s*=\s*["']([^"'#\s]{1,300})["']/gi;
+    let m: RegExpExecArray | null;
+    while ((m = attrRe.exec(html)) !== null) {
+      const raw = m[1].trim();
+      if (!raw || /^(?:javascript:|mailto:|tel:|data:|about:)/i.test(raw)) continue;
+      let u: URL;
+      try {
+        u = new URL(raw, target.origin);
+      } catch { continue; }
+      if (u.origin !== target.origin) continue;
+      if (/\.(?:css|png|jpe?g|gif|svg|ico|woff2?|ttf|eot)(?:\?|$)/i.test(u.pathname)) continue;
+      const full = u.origin + u.pathname + (u.search || "");
+      recon.endpoints.push(full);
+      u.searchParams.forEach((_, k) => {
+        if (!recon.params.has(k)) recon.params.set(k, full);
+      });
+    }
+  }
+
   private parseForms(html: string, baseUrl: string): Array<{ action: string; method: string; fields: string[] }> {
     const out: Array<{ action: string; method: string; fields: string[] }> = [];
     for (const m of html.matchAll(/<form\b[^>]*>([\s\S]*?)<\/form>/gi)) {

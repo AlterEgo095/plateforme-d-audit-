@@ -244,7 +244,7 @@ export const TOOL_META: Record<
   DEEPAUDIT: {
     label: "DeepAudit",
     color: TOOL_COLORS.DEEPAUDIT,
-    description: "Audit de code multi-agents",
+    description: "Agent IA d'audit profond (5 phases)",
     supportedTargets: TOOL_TARGET_COMPAT.DEEPAUDIT,
   },
   BASALT: {

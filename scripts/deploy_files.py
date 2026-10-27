@@ -12,12 +12,8 @@ PASSWORD = "REDACTED"
 FILES = [
     ("/home/z/my-project/mini-services/scan-engine/src/real-exec/deepaudit.ts",
      "/opt/auditforge/mini-services/scan-engine/src/real-exec/deepaudit.ts"),
-    ("/home/z/my-project/src/lib/dto.ts",
-     "/opt/auditforge/src/lib/dto.ts"),
-    ("/home/z/my-project/src/app/api/tools/route.ts",
-     "/opt/auditforge/src/app/api/tools/route.ts"),
-    ("/home/z/my-project/src/components/audit/campaigns-view.tsx",
-     "/opt/auditforge/src/components/audit/campaigns-view.tsx"),
+    ("/home/z/my-project/src/components/audit/status-badges.tsx",
+     "/opt/auditforge/src/components/audit/status-badges.tsx"),
 ]
 
 def main() -> int:

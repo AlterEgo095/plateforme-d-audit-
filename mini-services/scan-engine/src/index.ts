@@ -16,6 +16,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { timingSafeEqual } from "node:crypto";
 import { Server } from "socket.io";
 import { db } from "./db";
+import { reconcileStaleCampaigns } from "./campaign-finalize";
 import { ScanEngine, setIo } from "./engine";
 import { verifySessionToken } from "./session";
 import { currentExecMode, getRealAdapter } from "./real-exec/index";
@@ -35,7 +36,15 @@ const PORT = 3030;
 const MAX_BODY_BYTES = 1024 * 1024; // 1 MB
 const BODY_TIMEOUT_MS = 5000; // N.27 : lecture du corps plafonnée à 5 s
 const MAX_ROOMS_PER_SOCKET = 20; // K.4 : plafond de rooms par socket
-const SHUTDOWN_GRACE_MS = 3000; // N.24 : budget de finalisation à l'arrêt
+/**
+ * N.24 : budget de finalisation à l'arrêt. P0.4 (audit v2) : 3 s était
+ * insuffisant — un scan réel en cours (sqlmap/nuclei…) ne pouvait pas être
+ * finalisé avant SIGKILL → statut RUNNING en base → recovery le marquait
+ * FAILED à la reprise (scans perdus à chaque déploiement). 90 s couvre le
+ * kill des process outils + écriture CANCELLED ; stop_grace_period compose
+ * = 150 s (marge au-dessus).
+ */
+const SHUTDOWN_GRACE_MS = 90_000;
 // i1 : plafond global de scans exécutés en parallèle (protection VPS — Docker,
 // outils réels et RAM ne sont pas extensibles à l'infini).
 const MAX_CONCURRENT_SCANS = Math.max(1, Number(process.env.MAX_CONCURRENT_SCANS) || 3);
@@ -424,6 +433,11 @@ async function main(): Promise<void> {
   } catch (err) {
     console.warn("[scan-engine] récupération au démarrage impossible:", err);
   }
+
+  // P0.5 (audit v2) : réconciliation des campagnes RUNNING orphelines —
+  // celles dont tous les scans sont terminaux mais qui n'ont jamais été
+  // finalisées (bug antérieur ou interruption ci-dessus).
+  void reconcileStaleCampaigns();
 
   const engine = new ScanEngine();
 

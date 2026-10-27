@@ -21,6 +21,7 @@
 
 import type { Server } from "socket.io";
 import { db } from "./db";
+import { finalizeCampaignIfSettled } from "./campaign-finalize";
 import {
   effectiveFindingCount,
   FINDING_POOLS,
@@ -554,6 +555,8 @@ export class ScanEngine {
       };
       io().emit("scan:done", done);
       this.running.delete(cfg.scanId);
+      // P0.5 : la campagne peut être terminale (plus aucun scan actif).
+      await finalizeCampaignIfSettled(campaignId);
     } else {
       // Cohérence event/DB : signale FAILED côté temps réel + best-effort en base.
       try {
@@ -586,6 +589,8 @@ export class ScanEngine {
       };
       io().emit("scan:done", done);
       this.running.delete(cfg.scanId);
+      // P0.5 : idem, même en cas d'échec de persistance du scan lui-même.
+      await finalizeCampaignIfSettled(campaignId);
     }
   }
 
@@ -961,6 +966,8 @@ export class ScanEngine {
     };
     io().emit("scan:done", done);
     this.running.delete(cfg.scanId);
+    // P0.5 : annulation = mise à jour terminale → campagne peut être finalisée.
+    await finalizeCampaignIfSettled(campaignId);
   }
 
   // ── Fin de scan : échec ──
@@ -1022,6 +1029,8 @@ export class ScanEngine {
       criticalCount,
     };
     io().emit("scan:done", done);
+    // P0.5 : échec = mise à jour terminale → campagne peut être finalisée.
+    await finalizeCampaignIfSettled(campaignId);
   }
 
   private emitUpdate(ev: ScanUpdateEvent): void {

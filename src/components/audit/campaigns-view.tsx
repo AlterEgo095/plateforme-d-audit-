@@ -735,9 +735,8 @@ function CreateCampaignDialog({
 
           <div className="bg-muted/40 flex items-start gap-2 rounded-lg p-3 text-xs text-muted-foreground">
             <Info className="mt-0.5 size-3.5 shrink-0" aria-hidden />
-            Compatibilité outils ⇄ cibles : PHANTOM et REDAMON ciblent les URL
-            et plages réseau ; DEEPAUDIT et BASALT ciblent les URL et dépôts
-            Git.
+            Compatibilité outils ⇄ cibles : PHANTOM, DEEPAUDIT et REDAMON
+            ciblent les URL et plages réseau ; BASALT cible les dépôts Git.
           </div>
 
           <DialogFooter>

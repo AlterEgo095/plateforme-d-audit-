@@ -183,6 +183,30 @@ function findingsFromRunDir(workdir: string): RealFinding[] {
   }
 }
 
+/**
+ * Garde-fou anti-faux négatif : sonde la cible HTTP AVANT de lancer l'agent.
+ * Toute réponse HTTP (même 4xx/5xx) = joignable ; erreur réseau/timeout = non.
+ */
+async function probeReachable(ctx: RealAdapterContext, url: string): Promise<boolean> {
+  try {
+    const res = await fetch(url, {
+      redirect: "manual",
+      signal: AbortSignal.timeout(15_000),
+      headers: { "User-Agent": "Mozilla/5.0 (compatible; AuditForge/1.0)" },
+    });
+    await ctx.onLog(`Sonde de joignabilité : HTTP ${res.status} — cible atteignable`, "INFO", "phantom");
+    void res.body?.cancel();
+    return true;
+  } catch (err) {
+    await ctx.onLog(
+      `Sonde de joignabilité en échec (${err instanceof Error ? err.message : "erreur réseau"})`,
+      "WARN",
+      "phantom",
+    );
+    return false;
+  }
+}
+
 export class PhantomAdapter implements RealToolAdapter {
   readonly tool = "PHANTOM" as const;
 
@@ -212,6 +236,21 @@ export class PhantomAdapter implements RealToolAdapter {
   async run(ctx: RealAdapterContext): Promise<RealFinding[]> {
     const target = await prepareTarget(ctx);
     const mode = ctx.profile === "QUICK" ? "quick" : ctx.profile === "DEEP" ? "deep" : "standard";
+
+    // Garde-fou anti-faux « 0 vulnérabilité » : une cible HTTP injoignable
+    // (site hors ligne, pare-feu, geo-bloc, ban IP) ferait tourner l'agent
+    // 30-60 min pour conclure « 0 vulnérabilité » — un faux négatif total.
+    // On refuse explicitement AVANT de lancer la sandbox (cause claire).
+    if (/^https?:\/\//i.test(target.value)) {
+      const reachable = await probeReachable(ctx, target.value);
+      if (!reachable) {
+        throw new Error(
+          `Cible injoignable depuis le moteur (timeout/refus TCP sur ${target.value}) — le serveur ne répond pas. ` +
+          "Un audit rapporterait de faux « 0 vulnérabilité » : scan annulé avant exécution. " +
+          "Vérifiez que la cible est en ligne et qu'elle ne bloque pas l'IP du scanner.",
+        );
+      }
+    }
 
     await ctx.onLog(`phantom scan -t ${target.value} -m ${mode} --non-interactive --json`, "CMD", "phantom");
     await ctx.onPhase("INITIALISATION", 2);

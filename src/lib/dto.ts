@@ -52,14 +52,17 @@ export const SEVERITY_RANK: Record<Severity, number> = {
  * M4 (audit 8-a) : BASALT en mode RÉEL n'accepte qu'un chemin/dépôt GIT
  * (`basalt audit <chemin>`) — une cible URL produisait un échec systématique
  * sans repli. La compatibilité est alignée sur l'adaptateur réel.
- * Intégration 9 : DeepAudit audite du CODE (dépôts git clonés par la
- * plateforme, jamais une application déployée) → GIT uniquement.
+ * Intégration 9 : DeepAudit = agent d'audit profond multi-phases qui manipule
+ * les outils offensifs dans une sandbox Docker (recon → plan LLM → exploitation
+ * → vérification LLM → rapport) sur applications web déployées → URL + NETWORK.
  * RedAmon accepte URL (hôte dérivé) et NETWORK (IP/CIDR).
  */
 export const TOOL_TARGET_COMPAT: Record<Tool, TargetType[]> = {
   PHANTOM: ['URL', 'NETWORK'],
   REDAMON: ['URL', 'NETWORK'],
-  DEEPAUDIT: ['GIT'],
+  // DeepAudit = agent d'audit profond multi-phases (sandbox Docker Kali) :
+  // audite les applications web déployées (URL) et les hôtes (NETWORK).
+  DEEPAUDIT: ['URL', 'NETWORK'],
   BASALT: ['GIT'],
 }
 

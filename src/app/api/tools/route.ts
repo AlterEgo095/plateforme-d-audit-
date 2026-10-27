@@ -29,12 +29,21 @@ const TOOL_CATALOG: Omit<ToolInfo, 'status'>[] = [
     id: 'DEEPAUDIT',
     name: 'DeepAudit',
     description:
-      "Système multi-agents spécialisé dans l'audit approfondi : un agent de reconnaissance, un agent d'analyse " +
-      "et un agent de vérification qui rejoue les preuves de concept en sandbox DiD avant de les confirmer.",
-    nature: 'Multi-agents coordonnés (recon / analyse / vérification)',
-    integration: 'RAG code, semgrep, analyse statique',
-    sandbox: 'Sandbox DiD (isolation complète des PoC)',
-    capabilities: ['Multi-agents (recon/analyse/vérification)', 'PoC en sandbox DiD', 'RAG code'],
+      "Agent d'audit profond piloté par IA : à partir d'une reconnaissance exhaustive (empreinte HTTP/TLS/WAF, " +
+      "ports, crawl, JS, formulaires, paramètres cachés, fuzzing de répertoires), un LLM construit un plan d'attaque " +
+      "priorisé, pilote les outils offensifs (nuclei, sqlmap, dalfox, commix, nikto + sondes maison : traversée, " +
+      "redirection ouverte, SSRF, CORS, fichiers sensibles…), puis re-juge chaque candidat sur les preuves brutes " +
+      "avant de produire un rapport exhaustif. Pipeline déterministe en 5 phases — aucune phase ignorée.",
+    nature: "Agent IA multi-phases (recon → plan → exploitation → vérification → rapport)",
+    integration: 'nuclei, sqlmap, dalfox, commix, nikto, ffuf, arjun, katana, nmap, testssl + sondes maison',
+    sandbox: 'Sandbox Docker Kali dédiée (auditforge/phantom-sandbox-plus) — outillage isolé, preuves brutes conservées',
+    capabilities: [
+      'Recon exhaustive (ports/TLS/WAF/crawl/JS/params cachés)',
+      "Plan d'attaque priorisé par LLM",
+      'Exploitation ciblée (SQLi/XSS/RCE/traversal/SSRF/CORS/exposure)',
+      'Vérification LLM des preuves (faux positifs écartés)',
+      'Rapport exhaustif avec PoC reproductibles',
+    ],
     supportedTargets: [...TOOL_TARGET_COMPAT.DEEPAUDIT],
   },
   {

@@ -62,7 +62,10 @@ const createSchema = z.object({
   target: z.string().min(1).max(300),
   targetType: z.enum(TARGET_TYPES),
   profile: z.enum(PROFILES),
-  tools: z.array(z.enum(TOOLS)).min(1).max(4),
+  // P5 : arsenal complet — jusqu'à 8 outils par campagne (full arsenal URL).
+  tools: z.array(z.enum(TOOLS)).min(1).max(8),
+  // P5 : chaîne d'outils — exécution séquentielle (recon → DAST → exploitation).
+  sequential: z.boolean().optional().default(false),
   launchNow: z.boolean(),
 })
 
@@ -114,6 +117,7 @@ export const POST = withApi(async (req: NextRequest) => {
         targetType: input.targetType,
         profile: input.profile,
         status: 'DRAFT',
+        sequential: input.sequential,
         createdById: session.sub,
       },
     })
@@ -141,7 +145,7 @@ export const POST = withApi(async (req: NextRequest) => {
     session.username,
     'CAMPAIGN_CREATE',
     campaign.name,
-    `Cible ${campaign.target} (${campaign.profile}, ${campaign.targetType})`
+    `Cible ${campaign.target} (${campaign.profile}, ${campaign.targetType}${input.sequential ? ', chaîne séquentielle' : ''})`
   )
 
   // Lancement immédiat : appels moteur sous verrou applicatif par campagne (§L.8/§L.9)

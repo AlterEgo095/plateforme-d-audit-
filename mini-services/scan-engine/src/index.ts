@@ -21,9 +21,9 @@ import { startLogRetentionScheduler } from "./maintenance";
 import { ScanEngine, setIo } from "./engine";
 import { verifySessionToken } from "./session";
 import { currentExecMode, getRealAdapter } from "./real-exec/index";
+import type { EngineRunParams } from "./engine";
 import type {
   ClientToServerEvents,
-  EngineRunRequest,
   Profile,
   ScanDoneEvent,
   ScanFindingEvent,
@@ -52,7 +52,17 @@ const TOOLS_STATUS_TTL_MS = 60_000; // i5 : cache du statut réel des outils (1 
 /** P4 : cadence du réveil de la file d'attente (filet si une erreur DB a bloqué le pump). */
 const QUEUE_KICK_MS = 30_000;
 
-const TOOLS: Tool[] = ["PHANTOM", "DEEPAUDIT", "BASALT", "REDAMON"];
+/**
+ * P5 : catalogue complet — 4 plateformes/agents IA + 11 outils evergreen
+ * (arsenal). Synchronisé avec src/lib/dto.ts côté application.
+ */
+const TOOLS: Tool[] = [
+  "PHANTOM", "DEEPAUDIT", "BASALT", "REDAMON",
+  "SUBFINDER", "AMASS", "HTTPX",
+  "NUCLEI", "NIKTO", "ZAP",
+  "SEMGREP", "TRIVY", "GITLEAKS",
+  "SQLMAP", "FFUF",
+];
 const PROFILES: Profile[] = ["QUICK", "STANDARD", "DEEP"];
 const TARGET_TYPES: TargetType[] = ["URL", "GIT", "NETWORK"];
 const SCAN_ID_RE = /^[A-Za-z0-9_-]{6,64}$/;
@@ -284,20 +294,26 @@ async function route(req: IncomingMessage, res: ServerResponse, engine: ScanEngi
       // campagne à plusieurs outils n'échoue plus en heure de pointe. La file
       // n'est saturée qu'au-delà de MAX_QUEUED_SCANS (protection mémoire).
 
-      // Le scan doit exister en base (404 AVANT le 202) ; campaignId lu en base.
-      const scan = await db.scan.findUnique({ where: { id: scanId } });
+      // Le scan doit exister en base (404 AVANT le 202) ; campaignId + mode
+      // séquentiel lus en base (P5 : les chaînes d'outils sont portées par la
+      // campagne, jamais par l'appelant — pas de champ client à falsifier).
+      const scan = await db.scan.findUnique({
+        where: { id: scanId },
+        include: { campaign: { select: { sequential: true } } },
+      });
       if (!scan) {
         sendJson(res, 404, { ok: false, error: "scan not found" });
         return;
       }
 
-      const cfg: EngineRunRequest & { campaignId: string } = {
+      const cfg: EngineRunParams = {
         scanId,
         tool: tool as Tool,
         target,
         targetType: targetType as TargetType,
         profile: profile as Profile,
         campaignId: scan.campaignId,
+        sequential: scan.campaign?.sequential === true,
       };
       let where: "RUNNING" | "QUEUED";
       try {
@@ -364,25 +380,29 @@ async function route(req: IncomingMessage, res: ServerResponse, engine: ScanEngi
       }
       const mode = currentExecMode();
       const tools: Array<{ tool: string; mode: string; realAvailable: boolean; reason?: string }> = [];
-      for (const tool of TOOLS) {
-        const adapter = getRealAdapter(tool);
-        if (!adapter) {
-          tools.push({
-            tool,
-            mode,
-            realAvailable: false,
-            reason: "aucun adaptateur réel enregistré pour cet outil",
-          });
-          continue;
-        }
-        try {
-          const avail = await adapter.checkAvailable();
-          tools.push({ tool, mode, realAvailable: avail.available, reason: avail.reason });
-        } catch (err) {
-          tools.push({ tool, mode, realAvailable: false, reason: "vérification impossible" });
-          void err;
-        }
-      }
+      // P5 : 15 outils — les sondes de version (spawn) sont PARALLÉLISÉES, sinon
+      // le cas « aucun binaire installé » sérialiserait 15 timeouts (120 s+).
+      await Promise.all(
+        TOOLS.map(async (tool) => {
+          const adapter = getRealAdapter(tool);
+          if (!adapter) {
+            tools.push({
+              tool,
+              mode,
+              realAvailable: false,
+              reason: "aucun adaptateur réel enregistré pour cet outil",
+            });
+            return;
+          }
+          try {
+            const avail = await adapter.checkAvailable();
+            tools.push({ tool, mode, realAvailable: avail.available, reason: avail.reason });
+          } catch {
+            tools.push({ tool, mode, realAvailable: false, reason: "vérification impossible" });
+          }
+        }),
+      );
+      tools.sort((a, b) => TOOLS.indexOf(a.tool as Tool) - TOOLS.indexOf(b.tool as Tool));
       const payload = { ok: true, mode, tools };
       toolsStatusCache = { at: Date.now(), payload };
       sendJson(res, 200, payload);
@@ -453,11 +473,16 @@ async function main(): Promise<void> {
     console.warn("[scan-engine] récupération au démarrage impossible:", err);
   }
 
-  // P4 : re-dispatch des scans QUEUED hérités d'un redémarrage.
+  // P4 : re-dispatch des scans QUEUED hérités d'un redémarrage. P5 : l'ordre
+  // de création est préservé (les chaînes séquentielles se reconstruisent dans
+  // le bon ordre au sein du moteur).
   try {
     const waiting = await db.scan.findMany({
       where: { status: "QUEUED" },
-      include: { campaign: { select: { status: true, targetType: true, profile: true } } },
+      orderBy: { createdAt: "asc" },
+      include: {
+        campaign: { select: { status: true, targetType: true, profile: true, sequential: true } },
+      },
     });
     if (waiting.length > 0) {
       let redisp = 0;
@@ -507,6 +532,7 @@ async function main(): Promise<void> {
             targetType: s.campaign.targetType as TargetType,
             profile: s.campaign.profile as Profile,
             campaignId: s.campaignId,
+            sequential: s.campaign.sequential === true,
           });
           redisp++;
         } catch (err) {

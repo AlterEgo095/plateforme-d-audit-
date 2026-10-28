@@ -54,8 +54,11 @@ import type {
   Severity,
 } from "./types";
 
-/** Paramètres d'exécution : la requête interne + le campaignId lu en base (N.22). */
-export type EngineRunParams = EngineRunRequest & { campaignId: string };
+/** Paramètres d'exécution : la requête interne + le campaignId lu en base (N.22).
+ * P5 : `sequential` (lu en base depuis Campaign.sequential) active la chaîne
+ * d'outils — les scans d'une campagne séquentielle s'exécutent l'un après
+ * l'autre (recon → DAST → exploitation), indépendamment des ressources libres. */
+export type EngineRunParams = EngineRunRequest & { campaignId: string; sequential?: boolean };
 
 // ─── Limites de ressources (P4 — audit v2) ────────────────────────────
 
@@ -207,6 +210,17 @@ export class ScanEngine {
   private queue: Array<{ cfg: EngineRunParams; enqueuedAt: number }> = [];
   private pumping = false;
 
+  /**
+   * P5 : chaînes séquentielles par campagne. `head` = prochain scan à démarrer
+   * (pas encore en exécution) ; `pending` = la suite ordonnée. Le scan EN COURS
+   * n'est pas dans la chaîne (il est dans running) — l'avancement est déclenché
+   * par la fin de chaque scan (start().finally), le kick périodique, et submit.
+   * Les entrées de chaîne gardent leur statut DB QUEUED (cohérence campaign-finalize).
+   */
+  private chains = new Map<string, { head: EngineRunParams | null; pending: EngineRunParams[] }>();
+  /** Garde anti-entrée concurrente de advanceChain par campagne. */
+  private advancing = new Set<string>();
+
   /** Plafond de scans exécutés en parallèle (protection VPS — MAX_CONCURRENT_SCANS). */
   readonly maxConcurrent: number;
   /** Capacité de la file d'attente (MAX_QUEUED_SCANS). */
@@ -223,14 +237,45 @@ export class ScanEngine {
 
   /**
    * P4 : soumission d'un scan — démarrage immédiat si une ressource est libre,
-   * sinon mise en file d'attente FIFO (dispatch à chaque libération). Lève
-   * Error si le scan est déjà en cours/en file, ou si la file est saturée.
+   * sinon mise en file d'attente FIFO (dispatch à chaque libération). P5 : si
+   * la campagne est séquentielle, le scan rejoint la chaîne d'outils (head ou
+   * pending) et ne démarre que lorsque tous ses prédécesseurs sont terminaux.
+   * Lève Error si le scan est déjà en cours/en file, ou si la file est saturée.
    * Retourne le statut d'exécution résultant ('RUNNING' | 'QUEUED').
    */
   submit(cfg: EngineRunParams): "RUNNING" | "QUEUED" {
     if (this.running.has(cfg.scanId) || this.queue.some((q) => q.cfg.scanId === cfg.scanId)) {
       throw new Error("scan already running or queued");
     }
+
+    // ── P5 : campagne séquentielle (chaîne d'outils) ──
+    if (cfg.sequential) {
+      const chain = this.chains.get(cfg.campaignId);
+      if (chain) {
+        // Doublons dans la chaîne (head ou pending)
+        if (chain.head?.scanId === cfg.scanId || chain.pending.some((p) => p.scanId === cfg.scanId)) {
+          throw new Error("scan already running or queued");
+        }
+        // Saturation : la chaîne partage le budget de la file (protection mémoire)
+        if (chain.pending.length + (chain.head ? 1 : 0) >= this.maxQueued) {
+          throw new Error(
+            `Chaîne séquentielle saturée (${this.maxQueued}) — augmentez MAX_QUEUED_SCANS`,
+          );
+        }
+        chain.pending.push(cfg);
+        return "QUEUED";
+      }
+      // Premier scan de la chaîne : démarre immédiatement si une ressource est
+      // libre, sinon il devient la tête (lancée par advanceChain au prochain
+      // déclencheur — kick 30 s, fin d'un autre scan, ou pump).
+      this.chains.set(cfg.campaignId, { head: cfg, pending: [] });
+      if (this.running.size < this.maxConcurrent) {
+        this.advanceChain(cfg.campaignId);
+        return "RUNNING"; // avance optimiste : le scan existait (vérifié en 404 par la route)
+      }
+      return "QUEUED";
+    }
+
     if (this.running.size < this.maxConcurrent) {
       this.start(cfg);
       return "RUNNING";
@@ -242,6 +287,76 @@ export class ScanEngine {
     }
     this.queue.push({ cfg, enqueuedAt: Date.now() });
     return "QUEUED";
+  }
+
+  /**
+   * P5 : démarre la tête de la chaîne séquentielle d'une campagne (après
+   * re-vérification en base, comme pump : un scan annulé pendant son attente
+   * est écarté). Un seul scan de la chaîne à la fois — l'appel suivant est
+   * déclenché par la fin de ce scan. Récursion bornée (longueur de chaîne)
+   * pour sauter les entrées écartées.
+   */
+  private advanceChain(campaignId: string): void {
+    const chain = this.chains.get(campaignId);
+    if (!chain || this.advancing.has(campaignId)) return;
+    if (!chain.head) {
+      if (chain.pending.length === 0) this.chains.delete(campaignId);
+      return;
+    }
+    if (this.running.size >= this.maxConcurrent) return; // réessayé au prochain déclencheur
+    this.advancing.add(campaignId);
+    void (async () => {
+      try {
+        const head = chain.head;
+        if (!head) return;
+        let status: string | null = null;
+        try {
+          const row = await db.scan.findUnique({
+            where: { id: head.scanId },
+            select: { status: true },
+          });
+          status = row?.status ?? null;
+        } catch (err) {
+          // DB brièvement occupée : tête conservée, retentée au prochain déclencheur
+          console.warn(
+            `[engine] chaîne : vérification de ${head.scanId} impossible — retentera plus tard`,
+            err,
+          );
+          return;
+        }
+        if (this.running.size >= this.maxConcurrent) return; // occupé entre-temps
+        // P5 (fix recouvrement) : un scan de CETTE campagne tourne-t-il encore ?
+        // La global-concurrency seule ne suffit pas — le kick 30 s (ou tout
+        // autre déclencheur) peut avancer la chaîne pendant qu'un scan de la
+        // MÊME campagne est en cours. La base fait foi (aussi correct au boot).
+        try {
+          const active = await db.scan.count({
+            where: { campaignId, status: "RUNNING" },
+          });
+          if (active > 0) return; // la chaîne attendra la fin du scan courant
+        } catch {
+          return; // DB occupée — réessai au prochain déclencheur
+        }
+        chain.head = chain.pending.shift() ?? null;
+        if (status === "QUEUED") {
+          this.start(head);
+        } else {
+          console.log(
+            `[engine] chaîne : scan ${head.scanId} écarté (statut base : ${status ?? "inconnu"}) — avance au suivant`,
+          );
+          this.advanceChain(campaignId); // saute l'entrée écartée
+        }
+      } finally {
+        this.advancing.delete(campaignId);
+      }
+    })();
+  }
+
+  /** P5 : avance toutes les chaînes (déclenché à chaque fin de scan et par kick). */
+  private advanceAllChains(): void {
+    for (const campaignId of this.chains.keys()) {
+      this.advanceChain(campaignId);
+    }
   }
 
   /** Démarre réellement un scan (ancien corps de run()). */
@@ -259,7 +374,10 @@ export class ScanEngine {
         this.running.delete(cfg.scanId);
         ctrl.resolveDone();
         // P4 : une ressource vient de se libérer — dépile la file d'attente.
+        // P5 : avance les chaînes séquentielles (le scan suivant d'une campagne
+        // en chaîne démarre ici, et uniquement ici pour sa propre chaîne).
         this.pump();
+        this.advanceAllChains();
       });
   }
 
@@ -306,14 +424,17 @@ export class ScanEngine {
     })();
   }
 
-  /** P4 : réveille le dispatch (timer de sécurité — file bloquée par une erreur DB). */
+  /** P4 : réveille le dispatch (timer de sécurité — file bloquée par une erreur DB).
+   * P5 : réveille également les chaînes séquentielles en attente de ressources. */
   kick(): void {
     if (this.queue.length > 0) this.pump();
+    this.advanceAllChains();
   }
 
   /**
-   * Demande l'annulation : scan en cours → abort ; en file d'attente → retiré
-   * de la file. Retourne l'emplacement trouvé (null si inconnu du moteur).
+   * Demande l'annulation : scan en cours → abort ; en file d'attente (P4) ou
+   * dans une chaîne séquentielle (P5) → retiré. Retourne l'emplacement trouvé
+   * (null si inconnu du moteur).
    */
   cancel(scanId: string): "running" | "queued" | null {
     const ctrl = this.running.get(scanId);
@@ -325,6 +446,19 @@ export class ScanEngine {
     if (idx >= 0) {
       this.queue.splice(idx, 1);
       return "queued";
+    }
+    // P5 : retrait d'une chaîne séquentielle. Tête annulée → avance au suivant.
+    for (const [campaignId, chain] of this.chains) {
+      if (chain.head?.scanId === scanId) {
+        chain.head = chain.pending.shift() ?? null;
+        this.advanceChain(campaignId);
+        return "queued";
+      }
+      const pi = chain.pending.findIndex((p) => p.scanId === scanId);
+      if (pi >= 0) {
+        chain.pending.splice(pi, 1);
+        return "queued";
+      }
     }
     return null;
   }

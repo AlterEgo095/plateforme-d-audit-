@@ -16,7 +16,8 @@
 | **Vulnérabilités** | Consolidation multi-outils, sévérité / confiance / CVSS / CVE, preuves et PoC, statut de qualification (Ouvert → Confirmé / Faux positif / Corrigé), recherche et filtres |
 | **Rapports** | Document d'audit formel généré par scan (synthèse exécutive, groupement par sévérité, remédiations), **export PDF via impression** |
 | **Sécurité de la plateforme** | RBAC 3 rôles, sessions signées HMAC-SHA256 (cookie httpOnly), **MFA** (code de démo statique sur les comptes de démo uniquement), rate limiting sur la connexion, en-têtes de sécurité HTTP (CSP…), journal d'audit immuable |
-| **Multi-outils** | 4 moteurs intégrés avec phases, logs et constats propres à chaque outil ; sentinelles de vérification (PoC exécuté en sandbox sans réseau) |
+| **Multi-outils** | 4 plateformes/agents IA avec phases, logs et constats propres à chaque outil ; sentinelles de vérification (PoC exécuté en sandbox sans réseau) |
+| **Arsenal evergreen (P5)** | **11 outils durables intégrés** — recon : Subfinder, Amass, httpx · DAST : Nuclei (12k templates), Nikto, OWASP ZAP · SAST/SCA : Semgrep, Trivy, Gitleaks (--redact) · exploitation : sqlmap, ffuf. **Presets « Stratégie Evergreen »** en un clic, **chaînes d'outils séquentielles** (recon → DAST → exploitation), **export/push DefectDojo**, plafonds anti-flood, secrets jamais persistés |
 | **Endurance (P4)** | **File d'attente moteur** — une campagne à 4 outils démarre toujours même au-delà du plafond de scans simultanés (dispatch FIFO à chaque libération, annulable en file) ; scans en file **qui survivent aux redémarrages** ; métriques moteur enrichies (queue, uptime, mémoire) |
 
 ---
@@ -59,6 +60,65 @@ En **déploiement Docker**, un reverse proxy **Caddy** est le seul point d'entr�
 > En mode `simulation` (ou lorsqu'un outil réel est indisponible), chaque outil est reproduit par un pipeline réaliste : phases pondérées, logs crédibles, constats structurés, sentinelles PoC — sans toucher aucune cible.
 
 ---
+
+
+## ⚔️ L'arsenal evergreen (P5) — outils durables intégrés
+
+Au-delà des 4 plateformes/agents IA, le moteur intègre les **11 piliers open source** de l'audit profond
+et du pentest (sélection « evergreen » : maturité, écosystème, précision prouvée). Chaque outil dispose
+d'un adaptateur réel (framework générique : découverte binaire, args par profil, parsing JSON/JSONL,
+plafonds anti-flood) ET d'un pipeline de simulation complet.
+
+| Pilier | Outils | Cibles | Points forts |
+|---|---|---|---|
+| 🧭 Reconnaissance | **Subfinder**, **Amass**, **httpx** | URL, Réseau | Énumération passive 100+ sources, corrélation OSINT (takeovers), sondes HTTP vivantes |
+| ⚔️ DAST | **Nuclei**, **Nikto**, **OWASP ZAP** | URL (+ Réseau) | 12 000+ templates CVE réactifs, configuration serveur, automation framework CI |
+| 🔬 SAST / SCA / secrets | **Semgrep**, **Trivy**, **Gitleaks** | Git | Mode taint 20-100k LOC/s, dépendances + secrets, historique git complet **--redact** |
+| 💥 Exploitation | **sqlmap**, **ffuf** | URL | Toutes techniques d'injection (confirmées, sans `--dump`), fuzzing avec autofilter |
+| 📊 Reporting | **Export/push DefectDojo** | — | Format *Generic Findings Import* : `GET /api/reports/dojo?campaignId=…` (téléchargement) ou push API (`DOJO_API_URL` + `DOJO_API_TOKEN` + `DOJO_ENGAGEMENT_ID`) |
+
+**Orchestration — la puissance vient de l'enchaînement, pas d'un outil unique :**
+
+- **Presets « Stratégie Evergreen »** (assistant de campagne, un clic) : *Recon externe* (Subfinder+Amass+httpx),
+  *Audit web complet* (Nuclei+ZAP+sqlmap+ffuf+Nikto), *Audit de code* (Semgrep+Trivy+Gitleaks+Basalt),
+  *Agents IA* (Phantom+DeepAudit+RedAmon+Basalt). Seuls les outils compatibles avec la cible sont retenus.
+- **Chaînes d'outils séquentielles** : l'option « exécution séquentielle » d'une campagne fait s'enchaîner
+  les scans l'un après l'autre (recon → DAST → exploitation) au lieu de courir en parallèle — le résultat
+  de chaque maillon alimente la lecture du suivant. Compatible file d'attente (P4), annulation en chaîne
+  et reprise au boot.
+- Jusqu'à **8 outils par campagne** (full arsenal), validation stricte outil ⇄ cible inchangée.
+
+**Garde-fous appliqués aux adaptateurs arsenal :** plafonds de constats par scan (200-500 + constat de
+troncature), débits plafonnés (nuclei 150 req/s, ffuf 30 threads, sqlmap 4 threads), `gitleaks --redact`
+(valeurs de secrets JAMAIS persistées), sqlmap sans extraction de données, env sanitisée (m7) et timeout
+global `REAL_SCAN_TIMEOUT_MIN`.
+
+**Installation des binaires** (sur le conteneur/serveur du MOTEUR) :
+
+```bash
+# Recon (Go)
+go install github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
+go install github.com/projectdiscovery/httpx/cmd/httpx@latest
+go install github.com/owasp-amass/amass/v4/cmd/amass@latest
+# DAST
+go install github.com/projectdiscovery/nuclei/v2/cmd/nuclei@latest
+apt install nikto sqlmap
+# ZAP : image officielle zaproxy/zap-stable (zap-baseline.py dans le PATH)
+# SAST/SCA
+pipx install semgrep
+# trivy : https://trivy.dev (apt/brew) — gitleaks : releases GitHub / brew
+# Exploitation
+go install github.com/ffuf/ffuf/v2@latest
+apt install seclists   # wordlists ffuf (ou FFUF_WORDLIST=…)
+```
+
+Sans installation, chaque outil est **honnêtement signalé indisponible** (vue Outils, sonde par binaire,
+cache 60 s) et le mode `auto` bascule en simulation. Surcharges par env : `SUBFINDER_BIN`, `NUCLEI_BIN`,
+`ZAP_COMMAND`, `SEMGREP_CONFIG`, `FFUF_WORDLIST`, … (voir `.env.example`).
+
+**Hors périmètre CLI (assumé) :** *Burp Suite Professional* (commercial, workflow manuel — ses exports
+XML s'importent dans DefectDojo comme les nôtres) et *CodeQL* (requiert l'infrastructure GitHub Actions ;
+Semgrep couvre le SAST local). La convergence des résultats passe par le **hub DefectDojo**.
 
 ## ⚙️ Exécution réelle des outils — mode d'emploi
 
@@ -234,6 +294,8 @@ docker compose up -d --build
 | `MAX_CONCURRENT_SCANS` (engine) | Plafond global de scans simultanés (protection VPS) — **P4 : au-delà, mise en file d'attente FIFO au lieu d'un rejet** | `3` |
 | `MAX_QUEUED_SCANS` (engine) | Capacité de la file d'attente moteur (P4) — au-delà : rejet explicite ; les scans en file **survivent aux redémarrages** (reprise au boot) | `100` |
 | `LOG_RETENTION_DAYS` (engine) | Rétention des journaux de scan en jours (P3 — purges au boot puis chaque 24 h ; 0 désactive ; constats et AuditTrail intacts) | `30` |
+| `*_BIN` / `ZAP_COMMAND` / `SEMGREP_CONFIG` / `FFUF_WORDLIST` (engine) | Surcharges des binaires arsenal (Subfinder, Amass, httpx, Nuclei, Nikto, ZAP, Semgrep, Trivy, Gitleaks, sqlmap, ffuf) — détection PATH automatique | noms standards |
+| `DOJO_API_URL` / `DOJO_API_TOKEN` / `DOJO_ENGAGEMENT_ID` (app) | Push DefectDojo optionnel (POST /api/reports/dojo) — l'export GET fonctionne sans configuration | — |
 | `SITE_ORIGIN` (engine) | Origine autorisée pour les handshakes socket.io (CORS) | réflexif |
 | `PHANTOM_IMAGE` (engine) | Image sandbox Kali de Phantom (vide = défaut amont) | — |
 | `PHANTOM_COMPRESSOR_LLM` (engine) | Modèle LiteLLM du compresseur mémoire de Phantom | `PHANTOM_LLM` amont |
@@ -290,6 +352,7 @@ Chaque tentative de sauvegarde (succès **ou** échec) écrit `last-backup.json`
 - **Journal d'audit** immuable : connexion/déconnexion, création/lancement de campagnes, annulations, changements de statut des constats, générations de rapports.
 - **Robustesse** : wrapper d'erreurs uniforme (aucune fuite de stack), récupération au boot (scans orphelins → `FAILED`), arrêt gracieux (SIGTERM → scans finalisés `CANCELLED`), verrous applicatifs par campagne (anti course-critique), sanitization des cibles avant interpolation dans les logs.
 - **File d'attente moteur (P4)** : au-delà du plafond `MAX_CONCURRENT_SCANS`, les scans sont mis en file FIFO et démarrent dès qu'une ressource se libère (plus de scans en échec « trop de scans simultanés » en heure de pointe) ; chaque entrée est re-vérifiée en base avant dispatch (un scan annulé en file ne démarre jamais) ; les scans QUEUED **survivent aux redémarrages** du moteur (re-dispatch au boot — seuls les RUNNING interrompus passent FAILED) ; `/internal/health` expose queue/limites/uptime/mémoire.
+- **Arsenal sous contrôle (P5)** : les 11 outils evergreen s'exécutent avec des garde-fous intégrés — plafonds de constats par scan (anti-flood de la base), débits plafonnés (nuclei 150 req/s, ffuf 30 threads, sqlmap 4 threads), secrets gitleaks **jamais persistés** (`--redact`), sqlmap **sans extraction de données** (pas de `--dump`), recon 100 % passive (Subfinder/Amass), env sanitisée héritée (m7) et timeout global ; disponibilité réelle sondée par binaire (cache 60 s) — jamais de faux « connecté ».
 - **Hygiène logicielle (P3)** : `bun audit` sans critique dans les dépendances d'exécution, `overrides` npm pour écraser les transitives vulnérables (lodash), mises à jour semver-revues (next 16.4, react 19.3, prisma 6.19.3, zod 4.6) ; rétention `ScanLog` (`LOG_RETENTION_DAYS`) — la base ne croît plus sans borne.
 
 ---

@@ -33,10 +33,52 @@ import type { AuditTrail, Campaign, Finding, Scan, ScanLog, User } from '@prisma
 
 export const SEVERITIES: Severity[] = ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'INFO']
 export const FINDING_STATUSES: FindingStatus[] = ['OPEN', 'CONFIRMED', 'FALSE_POSITIVE', 'FIXED']
-export const TOOLS: Tool[] = ['PHANTOM', 'DEEPAUDIT', 'BASALT', 'REDAMON']
+/**
+ * P5 « Arsenal » — catalogue complet des outils :
+ *  - plateformes/agents IA : PHANTOM, DEEPAUDIT, BASALT, REDAMON ;
+ *  - evergreen : SUBFINDER, AMASS, HTTPX (recon) · NUCLEI, NIKTO, ZAP (DAST) ·
+ *    SEMGREP, TRIVY, GITLEAKS (SAST/SCA) · SQLMAP, FFUF (exploitation).
+ * Synchronisé avec TOOLS du moteur (mini-services/scan-engine/src/index.ts).
+ */
+export const TOOLS: Tool[] = [
+  'PHANTOM', 'DEEPAUDIT', 'BASALT', 'REDAMON',
+  'SUBFINDER', 'AMASS', 'HTTPX',
+  'NUCLEI', 'NIKTO', 'ZAP',
+  'SEMGREP', 'TRIVY', 'GITLEAKS',
+  'SQLMAP', 'FFUF',
+]
 export const SCAN_STATUSES: ScanStatus[] = ['QUEUED', 'RUNNING', 'COMPLETED', 'FAILED', 'CANCELLED']
 export const TARGET_TYPES: TargetType[] = ['URL', 'GIT', 'NETWORK']
 export const PROFILES: Profile[] = ['QUICK', 'STANDARD', 'DEEP']
+
+/** P5 : familles d'outils (regroupement du catalogue et de l'assistant campagne). */
+export type ToolFamily = 'AGENT' | 'RECON' | 'DAST' | 'CODE' | 'EXPLOIT'
+
+export const TOOL_FAMILY: Record<Tool, ToolFamily> = {
+  PHANTOM: 'AGENT',
+  DEEPAUDIT: 'AGENT',
+  BASALT: 'AGENT',
+  REDAMON: 'AGENT',
+  SUBFINDER: 'RECON',
+  AMASS: 'RECON',
+  HTTPX: 'RECON',
+  NUCLEI: 'DAST',
+  NIKTO: 'DAST',
+  ZAP: 'DAST',
+  SEMGREP: 'CODE',
+  TRIVY: 'CODE',
+  GITLEAKS: 'CODE',
+  SQLMAP: 'EXPLOIT',
+  FFUF: 'EXPLOIT',
+}
+
+export const TOOL_FAMILY_LABEL: Record<ToolFamily, string> = {
+  AGENT: 'Agents IA & plateformes',
+  RECON: 'Reconnaissance',
+  DAST: 'Scan dynamique (DAST)',
+  CODE: 'Analyse de code (SAST / SCA / secrets)',
+  EXPLOIT: 'Exploitation ciblée',
+}
 
 /** Poids de tri des sévérités (du plus grave au moins grave). */
 export const SEVERITY_RANK: Record<Severity, number> = {
@@ -48,14 +90,12 @@ export const SEVERITY_RANK: Record<Severity, number> = {
 }
 
 /**
- * Compatibilité outils ⇄ types de cible (worklog §B).
- * M4 (audit 8-a) : BASALT en mode RÉEL n'accepte qu'un chemin/dépôt GIT
- * (`basalt audit <chemin>`) — une cible URL produisait un échec systématique
- * sans repli. La compatibilité est alignée sur l'adaptateur réel.
- * Intégration 9 : DeepAudit = agent d'audit profond multi-phases qui manipule
- * les outils offensifs dans une sandbox Docker (recon → plan LLM → exploitation
- * → vérification LLM → rapport) sur applications web déployées → URL + NETWORK.
- * RedAmon accepte URL (hôte dérivé) et NETWORK (IP/CIDR).
+ * Compatibilité outils ⇄ types de cible (worklog §B + P5 « Arsenal »).
+ * M4 (audit 8-a) : BASALT en mode RÉEL n'accepte qu'un chemin/dépôt GIT.
+ * P5 : les 11 outils evergreen couvrent l'ensemble du spectre —
+ *   GIT : BASALT + SEMGREP + TRIVY + GITLEAKS (audit de code complet) ;
+ *   URL : recon, DAST, exploitation (Subfinder→Amass→httpx→Nuclei→ZAP→sqlmap/ffuf) ;
+ *   NETWORK : recon + Nuclei/Nikto sur hôtes.
  */
 export const TOOL_TARGET_COMPAT: Record<Tool, TargetType[]> = {
   PHANTOM: ['URL', 'NETWORK'],
@@ -64,6 +104,18 @@ export const TOOL_TARGET_COMPAT: Record<Tool, TargetType[]> = {
   // audite les applications web déployées (URL) et les hôtes (NETWORK).
   DEEPAUDIT: ['URL', 'NETWORK'],
   BASALT: ['GIT'],
+  // P5 — arsenal evergreen
+  SUBFINDER: ['URL', 'NETWORK'], // domaine dérivé (IP/plage refusée par l'adaptateur, message clair)
+  AMASS: ['URL', 'NETWORK'], // idem — énumération passive de domaine
+  HTTPX: ['URL', 'NETWORK'], // sondes HTTP (hôtes, IP, plages)
+  NUCLEI: ['URL', 'NETWORK'], // templates sur URL/hôte
+  NIKTO: ['URL', 'NETWORK'], // configuration serveur
+  ZAP: ['URL'], // automation framework (baseline) — URL déployée uniquement
+  SEMGREP: ['GIT'], // SAST sur dépôt cloné
+  TRIVY: ['GIT'], // SCA + secrets sur dépôt cloné
+  GITLEAKS: ['GIT'], // secrets sur dépôt cloné
+  SQLMAP: ['URL'], // endpoint HTTP
+  FFUF: ['URL'], // URL de base de fuzzing
 }
 
 export function isToolCompatible(tool: Tool, targetType: TargetType): boolean {
@@ -245,6 +297,7 @@ export function toCampaignDTO(c: CampaignLike, totals?: CampaignTotals): Campaig
     targetType: c.targetType as TargetType,
     profile: c.profile as Profile,
     status: c.status as CampaignStatus,
+    sequential: c.sequential ?? false,
     createdAt: c.createdAt.toISOString(),
     createdById: c.createdById,
     createdByName: c.createdBy?.username ?? 'inconnu',

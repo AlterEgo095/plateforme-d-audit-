@@ -84,6 +84,39 @@ RUN sed -i 's/priority_tools=\["nmap", "httpx", "nuclei", "sqlmap", "ffuf", "nik
  && sed -i 's/priority_tools=\["nmap", "httpx", "nuclei", "sqlmap"\]/priority_tools=["nmap", "httpx", "nuclei", "sqlmap", "nikto", "whatweb", "gobuster", "testssl.sh", "xsstrike", "commix", "wpscan", "dalfox", "zaproxy"]/' \
       /usr/local/lib/python3.12/site-packages/phantom/core/scan_profiles.py
 
+# ── 3) P5 « Arsenal » — outils evergreen (OPTIONNEL, activé par build-arg) ──
+# docker build --build-arg WITH_ARSENAL=1 -t auditforge/engine …
+# Installe les 11 piliers open source (recon / DAST / SAST-SCA / exploitation)
+# dans l'image du moteur. Sans ce build-arg, les outils restent en simulation
+# (disponibilité honnête — sonde par binaire). Go téléchargé en version
+# éphémère (multi-étapes implicites : couche unique, cache nettoyé).
+ARG WITH_ARSENAL=0
+RUN if [ "$WITH_ARSENAL" = "1" ]; then set -eux; \
+      apt-get update -y \
+      && apt-get install -y --no-install-recommends golang-go wget unzip \
+      && GOBIN=/usr/local/bin go install github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest \
+      && GOBIN=/usr/local/bin go install github.com/projectdiscovery/httpx/cmd/httpx@latest \
+      && GOBIN=/usr/local/bin go install github.com/projectdiscovery/nuclei/v2/cmd/nuclei@latest \
+      && GOBIN=/usr/local/bin go install github.com/owasp-amass/amass/v4/cmd/amass@latest \
+      && GOBIN=/usr/local/bin go install github.com/ffuf/ffuf/v2@latest \
+      && apt-get install -y --no-install-recommends nikto sqlmap \
+      && pip install --no-cache-dir semgrep \
+      && wget -qO /tmp/trivy.tgz https://github.com/aquasecurity/trivy/releases/latest/download/trivy_Linux-64bit.tar.gz \
+      && tar -xzf /tmp/trivy.tgz -C /usr/local/bin trivy && rm /tmp/trivy.tgz \
+      && wget -qO /usr/local/bin/gitleaks https://github.com/gitleaks/gitleaks/releases/latest/download/gitleaks-linux-amd64 \
+      && chmod 0755 /usr/local/bin/gitleaks \
+      && apt-get purge -y --auto-remove golang-go wget unzip \
+      && rm -rf /var/lib/apt/lists/* /root/.cache /root/go; \
+    fi
+
+# Wordlist ffuf (seclists) — incluse avec WITH_ARSENAL ; chemin surchargeable
+# par FFUF_WORDLIST (défaut du moteur : /usr/share/seclists/Discovery/Web-Content/common.txt).
+ARG WITH_SECLISTS=0
+RUN if [ "$WITH_SECLISTS" = "1" ]; then set -eux; \
+      apt-get update -y && apt-get install -y --no-install-recommends seclists \
+      && rm -rf /var/lib/apt/lists/*; \
+    fi
+
 # Bun (binaire autonome) + code du moteur (client Prisma généré inclus).
 COPY --from=oven/bun:1 /usr/local/bin/bun /usr/local/bin/bun
 COPY --from=build /engine /engine

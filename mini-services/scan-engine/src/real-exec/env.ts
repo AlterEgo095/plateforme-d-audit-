@@ -57,6 +57,7 @@ export const REAL_EXEC = {
 
   /** Modèle LiteLLM transmis à Phantom (format provider/model). */
   phantomLlm: process.env.PHANTOM_LLM ?? "openai/glm-4.6",
+
   /**
    * Image Docker de la sandbox Kali de Phantom (défaut amont :
    * ghcr.io/usta0x001/phantom-sandbox:latest — variante enrichie :
@@ -83,6 +84,28 @@ export const REAL_EXEC = {
   /** Timeout global d'un scan réel (minutes) — au-delà : échec (défaut 180, borné). */
   timeoutMinutes: parseTimeoutMinutes(process.env.REAL_SCAN_TIMEOUT_MIN),
 
+  // ── P5 « Arsenal » — binaires evergreen (surcharges par env) ─────────
+  // Reconnaissance
+  subfinderBin: (process.env.SUBFINDER_BIN ?? "subfinder").trim(),
+  amassBin: (process.env.AMASS_BIN ?? "amass").trim(),
+  httpxBin: (process.env.HTTPX_BIN ?? "httpx").trim(),
+  // Scan dynamique (DAST)
+  nucleiBin: (process.env.NUCLEI_BIN ?? "nuclei").trim(),
+  niktoBin: (process.env.NIKTO_BIN ?? "nikto").trim(),
+  /** Script d'automatisation OWASP ZAP (baseline CI). */
+  zapCommand: (process.env.ZAP_COMMAND ?? "zap-baseline.py").trim(),
+  // Analyse de code (SAST/SCA/secrets)
+  semgrepBin: (process.env.SEMGREP_BIN ?? "semgrep").trim(),
+  /** Règles Semgrep : « auto » (registre, réseau requis) ou chemin de règles local. */
+  semgrepConfig: (process.env.SEMGREP_CONFIG ?? "auto").trim(),
+  trivyBin: (process.env.TRIVY_BIN ?? "trivy").trim(),
+  gitleaksBin: (process.env.GITLEAKS_BIN ?? "gitleaks").trim(),
+  // Exploitation ciblée
+  sqlmapBin: (process.env.SQLMAP_BIN ?? "sqlmap").trim(),
+  ffufBin: (process.env.FFUF_BIN ?? "ffuf").trim(),
+  /** Wordlist de ffuf — vérifiée à la disponibilité (manquante → outil honnêtement indisponible). */
+  ffufWordlist: (process.env.FFUF_WORDLIST ?? "/usr/share/seclists/Discovery/Web-Content/common.txt").trim(),
+
   /** Durées estimées (ms) pour l'affichage de progression des scans réels. */
   estimatedMs: (tool: Tool, profile: Profile): number => {
     const baseMinutes =
@@ -92,6 +115,18 @@ export const REAL_EXEC = {
           BASALT: { QUICK: 8, STANDARD: 20, DEEP: 45 } as Record<string, number>,
           DEEPAUDIT: { QUICK: 20, STANDARD: 45, DEEP: 120 } as Record<string, number>,
           REDAMON: { QUICK: 25, STANDARD: 60, DEEP: 150 } as Record<string, number>,
+          // P5 — arsenal evergreen (durées typiques d'un run CLI)
+          SUBFINDER: { QUICK: 2, STANDARD: 4, DEEP: 8 } as Record<string, number>,
+          AMASS: { QUICK: 8, STANDARD: 20, DEEP: 45 } as Record<string, number>,
+          HTTPX: { QUICK: 1, STANDARD: 2, DEEP: 4 } as Record<string, number>,
+          NUCLEI: { QUICK: 5, STANDARD: 12, DEEP: 30 } as Record<string, number>,
+          NIKTO: { QUICK: 8, STANDARD: 18, DEEP: 40 } as Record<string, number>,
+          ZAP: { QUICK: 10, STANDARD: 20, DEEP: 45 } as Record<string, number>,
+          SEMGREP: { QUICK: 4, STANDARD: 10, DEEP: 25 } as Record<string, number>,
+          TRIVY: { QUICK: 3, STANDARD: 7, DEEP: 18 } as Record<string, number>,
+          GITLEAKS: { QUICK: 2, STANDARD: 4, DEEP: 10 } as Record<string, number>,
+          SQLMAP: { QUICK: 8, STANDARD: 20, DEEP: 45 } as Record<string, number>,
+          FFUF: { QUICK: 3, STANDARD: 7, DEEP: 18 } as Record<string, number>,
         } as Record<string, Record<string, number>>
       )[tool] ?? { QUICK: 20, STANDARD: 45, DEEP: 90 };
     return (baseMinutes[profile] ?? 45) * 60_000;

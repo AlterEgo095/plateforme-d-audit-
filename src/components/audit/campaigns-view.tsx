@@ -8,6 +8,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Crosshair,
+  FileDown,
   GitBranch,
   Globe,
   Info,
@@ -76,7 +77,9 @@ import {
   ScanStatusBadge,
   TOOL_META,
   ToolBadge,
+  TOOL_FAMILY_LABELS,
   formatDateTime,
+  toolFamilyOf,
 } from "@/components/audit/status-badges";
 import type {
   CampaignDTO,
@@ -87,6 +90,19 @@ import type {
 } from "@/lib/types";
 
 const TOOL_IDS = Object.keys(TOOL_META) as Tool[];
+
+/**
+ * P5 — presets « Stratégie Evergreen » : orchestration des piliers durables
+ * (l'analyse d'écosystème validée : la puissance vient de l'orchestration, pas
+ * d'un outil unique). À l'application, seuls les outils compatibles avec le
+ * type de cible courant sont retenus.
+ */
+const EVERGREEN_PRESETS: { id: string; label: string; tools: Tool[] }[] = [
+  { id: "recon", label: "Recon externe", tools: ["SUBFINDER", "AMASS", "HTTPX"] },
+  { id: "web", label: "Audit web complet", tools: ["NUCLEI", "ZAP", "SQLMAP", "FFUF", "NIKTO"] },
+  { id: "code", label: "Audit de code", tools: ["SEMGREP", "TRIVY", "GITLEAKS", "BASALT"] },
+  { id: "agents", label: "Agents IA", tools: ["PHANTOM", "DEEPAUDIT", "REDAMON", "BASALT"] },
+];
 
 const TARGET_PLACEHOLDERS: Record<TargetType, string> = {
   URL: "https://cible.exemple.com",
@@ -453,6 +469,33 @@ function CampaignCard({
               Relancer
             </Button>
           )}
+          {/* P5 : export DefectDojo (hub central — Generic Findings Import). */}
+          <TooltipProvider delayDuration={200}>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-11 sm:h-9 flex-1 sm:flex-none"
+                  asChild
+                >
+                  <a
+                    href={`/api/reports/dojo?campaignId=${campaign.id}`}
+                    target="_blank"
+                    rel="noreferrer"
+                    aria-label={`Exporter la campagne ${campaign.name} au format DefectDojo`}
+                  >
+                    <FileDown className="size-4" aria-hidden />
+                    Dojo
+                  </a>
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>Export DefectDojo (import générique)</TooltipContent>
+            </Tooltip>
+          </TooltipProvider>
+          {campaign.sequential && (
+            <span className="text-muted-foreground ml-auto text-[11px]">chaîne séquentielle</span>
+          )}
           {user.role === "ADMIN" && (
             <TooltipProvider delayDuration={200}>
               <Tooltip>
@@ -460,7 +503,10 @@ function CampaignCard({
                   <Button
                     variant="ghost"
                     size="icon"
-                    className="ml-auto size-11 text-muted-foreground hover:text-rose-400"
+                    className={cn(
+                      "size-11 text-muted-foreground hover:text-rose-400",
+                      !campaign.sequential && "ml-auto"
+                    )}
                     aria-label={`Supprimer la campagne ${campaign.name}`}
                     onClick={onDelete}
                   >
@@ -493,6 +539,7 @@ function CreateCampaignDialog({
   const [target, setTarget] = useState("");
   const [profile, setProfile] = useState<Profile>("STANDARD");
   const [tools, setTools] = useState<Tool[]>(["PHANTOM"]);
+  const [sequential, setSequential] = useState(false);
   const [launchNow, setLaunchNow] = useState(true);
   const [submitting, setSubmitting] = useState(false);
 
@@ -505,6 +552,27 @@ function CreateCampaignDialog({
       })),
     [targetType]
   );
+
+  // P5 : regroupement des outils compatibles par famille (assistant lisible à
+  // 15 outils — l'ordre des familles suit le catalogue : agents puis arsenal).
+  const groupedTools = useMemo(() => {
+    const groups: { family: string; label: string; items: typeof compatibleTools }[] = [];
+    for (const t of compatibleTools) {
+      const family = toolFamilyOf(t.id);
+      let group = groups.find((g) => g.family === family);
+      if (!group) {
+        group = { family, label: TOOL_FAMILY_LABELS[family] ?? family, items: [] };
+        groups.push(group);
+      }
+      group.items.push(t);
+    }
+    return groups;
+  }, [compatibleTools]);
+
+  /** P5 : applique un preset evergreen (outils compatibles uniquement). */
+  const applyPreset = (presetTools: Tool[]) => {
+    setTools(presetTools.filter((id) => TOOL_META[id].supportedTargets.includes(targetType)));
+  };
 
   // Retire les outils devenus incompatibles quand le type de cible change.
   // P4 : retrait différé d'un tick — annulé si le type re-change (react-hooks v6).
@@ -526,6 +594,7 @@ function CreateCampaignDialog({
     setTarget("");
     setProfile("STANDARD");
     setTools(["PHANTOM"]);
+    setSequential(false);
     setLaunchNow(true);
   };
 
@@ -544,6 +613,7 @@ function CreateCampaignDialog({
         targetType,
         profile,
         tools,
+        sequential,
         launchNow,
       });
       toast({
@@ -658,69 +728,125 @@ function CreateCampaignDialog({
 
           <div className="space-y-2">
             <Label>Outils à orchestrer *</Label>
-            <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-              {compatibleTools.map((t) => {
-                const checked = tools.includes(t.id);
+            {/* P5 : presets « Stratégie Evergreen » — orchestration en un clic. */}
+            <div className="flex flex-wrap items-center gap-1.5">
+              <span className="text-muted-foreground mr-1 text-[11px] uppercase tracking-wide">
+                Presets :
+              </span>
+              {EVERGREEN_PRESETS.map((preset) => {
+                const usable = preset.tools.filter((id) =>
+                  TOOL_META[id].supportedTargets.includes(targetType)
+                );
+                const active =
+                  usable.length > 0 &&
+                  usable.length === tools.length &&
+                  usable.every((id) => tools.includes(id));
                 return (
-                  <TooltipProvider key={t.id} delayDuration={200}>
-                    <Tooltip>
-                      <TooltipTrigger asChild>
-                        <label
-                          className={cn(
-                            "flex cursor-pointer items-start gap-2.5 rounded-lg border p-3 transition-colors",
-                            checked
-                              ? "border-primary bg-primary/10"
-                              : "hover:bg-accent/50",
-                            !t.compatible && "cursor-not-allowed opacity-45"
-                          )}
-                        >
-                          <Checkbox
-                            className="mt-0.5"
-                            checked={checked && t.compatible}
-                            disabled={!t.compatible}
-                            onCheckedChange={(v) =>
-                              setTools((prev) =>
-                                v
-                                  ? [...prev, t.id]
-                                  : prev.filter((x) => x !== t.id)
-                              )
-                            }
-                            aria-label={`Sélectionner l'outil ${t.id}`}
-                          />
-                          <span className="min-w-0 space-y-0.5">
-                            <ToolBadge tool={t.id} small />
-                            <span className="block text-xs leading-snug">
-                              {t.description}
-                            </span>
-                            <span className="text-muted-foreground block text-[11px]">
-                              {t.supportedTargets
-                                .map((tt) =>
-                                  tt === "URL"
-                                    ? "URL"
-                                    : tt === "GIT"
-                                      ? "Git"
-                                      : "Réseau"
-                                )
-                                .join(" · ")}
-                            </span>
-                          </span>
-                        </label>
-                      </TooltipTrigger>
-                      {!t.compatible && (
-                        <TooltipContent>
-                          Outil incompatible avec ce type de cible
-                        </TooltipContent>
-                      )}
-                    </Tooltip>
-                  </TooltipProvider>
+                  <Button
+                    key={preset.id}
+                    type="button"
+                    variant={active ? "default" : "outline"}
+                    size="sm"
+                    className="h-8 px-2.5 text-xs"
+                    disabled={usable.length === 0}
+                    onClick={() => applyPreset(preset.tools)}
+                  >
+                    {preset.label}
+                    {usable.length > 0 && (
+                      <span className="text-muted-foreground ml-1 text-[10px]">{usable.length}</span>
+                    )}
+                  </Button>
                 );
               })}
             </div>
+            {groupedTools.map((group) => (
+              <div key={group.family} className="space-y-1.5">
+                <p className="text-muted-foreground pt-1 text-[11px] uppercase tracking-wide">
+                  {group.label}
+                </p>
+                <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                  {group.items.map((t) => {
+                    const checked = tools.includes(t.id);
+                    return (
+                      <TooltipProvider key={t.id} delayDuration={200}>
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <label
+                              className={cn(
+                                "flex cursor-pointer items-start gap-2.5 rounded-lg border p-3 transition-colors",
+                                checked
+                                  ? "border-primary bg-primary/10"
+                                  : "hover:bg-accent/50",
+                                !t.compatible && "cursor-not-allowed opacity-45"
+                              )}
+                            >
+                              <Checkbox
+                                className="mt-0.5"
+                                checked={checked && t.compatible}
+                                disabled={!t.compatible}
+                                onCheckedChange={(v) =>
+                                  setTools((prev) =>
+                                    v
+                                      ? [...prev, t.id]
+                                      : prev.filter((x) => x !== t.id)
+                                  )
+                                }
+                                aria-label={`Sélectionner l'outil ${t.id}`}
+                              />
+                              <span className="min-w-0 space-y-0.5">
+                                <ToolBadge tool={t.id} small />
+                                <span className="block text-xs leading-snug">
+                                  {t.description}
+                                </span>
+                                <span className="text-muted-foreground block text-[11px]">
+                                  {t.supportedTargets
+                                    .map((tt) =>
+                                      tt === "URL"
+                                        ? "URL"
+                                        : tt === "GIT"
+                                          ? "Git"
+                                          : "Réseau"
+                                    )
+                                    .join(" · ")}
+                                </span>
+                              </span>
+                            </label>
+                          </TooltipTrigger>
+                          {!t.compatible && (
+                            <TooltipContent>
+                              Outil incompatible avec ce type de cible
+                            </TooltipContent>
+                          )}
+                        </Tooltip>
+                      </TooltipProvider>
+                    );
+                  })}
+                </div>
+              </div>
+            ))}
             {tools.length === 0 && (
               <p className="text-destructive text-xs" role="alert">
                 Sélectionnez au moins un outil compatible.
               </p>
             )}
+          </div>
+
+          {/* P5 : chaîne d'outils — exécution séquentielle. */}
+          <div className="flex items-center justify-between gap-3 rounded-lg border p-3">
+            <div className="space-y-0.5">
+              <Label htmlFor="sequential-mode" className="cursor-pointer">
+                Chaîne d&apos;outils (exécution séquentielle)
+              </Label>
+              <p className="text-muted-foreground text-xs">
+                Les scans s&apos;enchaînent l&apos;un après l&apos;autre (recon →
+                DAST → exploitation) au lieu de courir en parallèle.
+              </p>
+            </div>
+            <Switch
+              id="sequential-mode"
+              checked={sequential}
+              onCheckedChange={setSequential}
+            />
           </div>
 
           <div className="flex items-center justify-between gap-3 rounded-lg border p-3">
@@ -741,8 +867,10 @@ function CreateCampaignDialog({
 
           <div className="bg-muted/40 flex items-start gap-2 rounded-lg p-3 text-xs text-muted-foreground">
             <Info className="mt-0.5 size-3.5 shrink-0" aria-hidden />
-            Compatibilité outils ⇄ cibles : PHANTOM, DEEPAUDIT et REDAMON
-            ciblent les URL et plages réseau ; BASALT cible les dépôts Git.
+            Compatibilité outils ⇄ cibles : URL — recon, DAST et exploitation
+            (Subfinder/Amass/httpx, Nuclei/ZAP/Nikto, sqlmap/ffuf) ; Git —
+            audit de code (Semgrep/Trivy/Gitleaks, Basalt) ; réseau — recon,
+            Nuclei, Nikto, agents IA.
           </div>
 
           <DialogFooter>

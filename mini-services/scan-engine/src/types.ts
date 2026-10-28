@@ -9,7 +9,34 @@
 
 export type Role = "ADMIN" | "AUDITOR" | "VIEWER";
 
-export type Tool = "PHANTOM" | "DEEPAUDIT" | "BASALT" | "REDAMON";
+/**
+ * Outils d'audit — P5 « Arsenal » :
+ *  - Plateformes / agents IA : PHANTOM, DEEPAUDIT, BASALT, REDAMON ;
+ *  - Reconnaissance (ProjectDiscovery + OWASP) : SUBFINDER, AMASS, HTTPX ;
+ *  - Scan dynamique (DAST) : NUCLEI, NIKTO, ZAP ;
+ *  - Analyse de code (SAST/SCA/secrets) : SEMGREP, TRIVY, GITLEAKS ;
+ *  - Exploitation ciblée : SQLMAP, FFUF.
+ * Ajout strictement additif : la base stocke la colonne `tool` en String.
+ */
+export type Tool =
+  | "PHANTOM"
+  | "DEEPAUDIT"
+  | "BASALT"
+  | "REDAMON"
+  | "SUBFINDER"
+  | "AMASS"
+  | "HTTPX"
+  | "NUCLEI"
+  | "NIKTO"
+  | "ZAP"
+  | "SEMGREP"
+  | "TRIVY"
+  | "GITLEAKS"
+  | "SQLMAP"
+  | "FFUF";
+
+/** Famille d'un outil (P5 — regroupement du catalogue et de l'UI campagne). */
+export type ToolFamily = "AGENT" | "RECON" | "DAST" | "CODE" | "EXPLOIT";
 
 export type TargetType = "URL" | "GIT" | "NETWORK";
 
@@ -143,6 +170,8 @@ export interface ToolInfo {
   realAvailable?: boolean;
   /** Raison d'indisponibilité de l'exécution réelle, le cas échéant. */
   realReason?: string;
+  /** P5 : famille de l'outil (regroupement catalogue / assistant de campagne). */
+  family?: ToolFamily;
 }
 
 // ─── Événements socket.io (moteur :3030 → navigateur) ────────────────

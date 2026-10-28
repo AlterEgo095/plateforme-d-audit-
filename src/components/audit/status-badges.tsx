@@ -214,18 +214,31 @@ export function FindingStatusBadge({
 export const FINDING_STATUS_LABELS_MAP = FINDING_STATUS_LABELS;
 
 const TOOL_COLORS: Record<Tool, string> = {
+  // Plateformes / agents IA
   PHANTOM: "#a78bfa",
   DEEPAUDIT: "#2dd4bf",
   BASALT: "#34d399",
   REDAMON: "#fbbf24",
+  // P5 — arsenal evergreen
+  SUBFINDER: "#f472b6",
+  AMASS: "#fb7185",
+  HTTPX: "#d9f99d",
+  NUCLEI: "#f87171",
+  NIKTO: "#fb923c",
+  ZAP: "#e879f9",
+  SEMGREP: "#4ade80",
+  TRIVY: "#5eead4",
+  GITLEAKS: "#c084fc",
+  SQLMAP: "#ef4444",
+  FFUF: "#facc15",
 };
 
 // M4 (audit 8-a) : les cibles supportées dérivent de TOOL_TARGET_COMPAT
 // (src/lib/dto.ts) — SOURCE UNIQUE, aucun drift possible entre le formulaire
 // de campagne, les fiches outils et la validation serveur.
-import { TOOL_TARGET_COMPAT } from "@/lib/dto";
+import { TOOL_TARGET_COMPAT, TOOL_FAMILY } from "@/lib/dto";
 
-/** Métadonnées centralisées des outils (contrat §B pour les cibles). */
+/** Métadonnées centralisées des outils (contrat §B pour les cibles + P5 familles). */
 export const TOOL_META: Record<
   Tool,
   {
@@ -259,7 +272,87 @@ export const TOOL_META: Record<
     description: "Reconnaissance & exploitation",
     supportedTargets: TOOL_TARGET_COMPAT.REDAMON,
   },
+  // P5 — arsenal evergreen
+  SUBFINDER: {
+    label: "Subfinder",
+    color: TOOL_COLORS.SUBFINDER,
+    description: "Énumération passive de sous-domaines (100+ sources)",
+    supportedTargets: TOOL_TARGET_COMPAT.SUBFINDER,
+  },
+  AMASS: {
+    label: "Amass",
+    color: TOOL_COLORS.AMASS,
+    description: "Cartographie OSINT profonde (OWASP)",
+    supportedTargets: TOOL_TARGET_COMPAT.AMASS,
+  },
+  HTTPX: {
+    label: "httpx",
+    color: TOOL_COLORS.HTTPX,
+    description: "Sondes HTTP vivantes (fingerprint)",
+    supportedTargets: TOOL_TARGET_COMPAT.HTTPX,
+  },
+  NUCLEI: {
+    label: "Nuclei",
+    color: TOOL_COLORS.NUCLEI,
+    description: "Scan de signatures 12k templates (CVE)",
+    supportedTargets: TOOL_TARGET_COMPAT.NUCLEI,
+  },
+  NIKTO: {
+    label: "Nikto",
+    color: TOOL_COLORS.NIKTO,
+    description: "Configuration serveur (6 500 tests)",
+    supportedTargets: TOOL_TARGET_COMPAT.NIKTO,
+  },
+  ZAP: {
+    label: "OWASP ZAP",
+    color: TOOL_COLORS.ZAP,
+    description: "DAST automatisé (baseline CI)",
+    supportedTargets: TOOL_TARGET_COMPAT.ZAP,
+  },
+  SEMGREP: {
+    label: "Semgrep",
+    color: TOOL_COLORS.SEMGREP,
+    description: "SAST sémantique rapide (mode taint)",
+    supportedTargets: TOOL_TARGET_COMPAT.SEMGREP,
+  },
+  TRIVY: {
+    label: "Trivy",
+    color: TOOL_COLORS.TRIVY,
+    description: "SCA dépendances + secrets + misconfig",
+    supportedTargets: TOOL_TARGET_COMPAT.TRIVY,
+  },
+  GITLEAKS: {
+    label: "Gitleaks",
+    color: TOOL_COLORS.GITLEAKS,
+    description: "Secrets dans le dépôt et l'historique (--redact)",
+    supportedTargets: TOOL_TARGET_COMPAT.GITLEAKS,
+  },
+  SQLMAP: {
+    label: "sqlmap",
+    color: TOOL_COLORS.SQLMAP,
+    description: "Exploitation d'injections SQL",
+    supportedTargets: TOOL_TARGET_COMPAT.SQLMAP,
+  },
+  FFUF: {
+    label: "ffuf",
+    color: TOOL_COLORS.FFUF,
+    description: "Fuzzing de répertoires/paramètres",
+    supportedTargets: TOOL_TARGET_COMPAT.FFUF,
+  },
 };
+
+/** P5 : libellés FR des familles (regroupement de l'assistant de campagne). */
+export const TOOL_FAMILY_LABELS: Record<string, string> = {
+  AGENT: "Agents IA & plateformes",
+  RECON: "Reconnaissance",
+  DAST: "Scan dynamique (DAST)",
+  CODE: "Analyse de code",
+  EXPLOIT: "Exploitation ciblée",
+};
+
+export function toolFamilyOf(tool: Tool): string {
+  return TOOL_FAMILY[tool] ?? "AGENT";
+}
 
 export function toolColor(tool: Tool | string): string {
   return TOOL_META[tool as Tool]?.color ?? "#94a3b8";

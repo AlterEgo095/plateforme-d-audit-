@@ -28,6 +28,9 @@ model Campaign {
   targetType  String // URL | GIT | NETWORK
   profile     String // QUICK | STANDARD | DEEP
   status      String   @default("DRAFT") // DRAFT | RUNNING | COMPLETED | FAILED | CANCELLED
+  // P5 : exécution séquentielle (chaîne d'outils) — les scans démarrent l'un
+  // après l'autre (recon → DAST → exploitation) au lieu de courir en parallèle.
+  sequential  Boolean  @default(false)
   createdById String
   createdBy   User     @relation(fields: [createdById], references: [id])
   createdAt   DateTime @default(now())

@@ -1,17 +1,26 @@
 /**
  * AuditForge — Registre des adaptateurs d'exécution réelle.
  *
- * Les 4 outils disposent d'un adaptateur réel :
+ * Plateformes / agents IA (adaptateurs dédiés) :
  *   - PHANTOM (CLI phantom-agent + sandbox Docker Kali) ;
  *   - BASALT (CLI basalt-scan + sandbox Docker PoC) ;
  *   - DEEPAUDIT (plateforme distante pilotée par API REST) ;
  *   - REDAMON (plateforme distante pilotée par API REST).
- * Les plateformes doivent être déployées à côté du moteur et déclarées via
- * les variables DEEPAUDIT_API_URL / REDAMON_API_URL (voir README — section
- * « Exécution réelle »). Sans configuration, l'indisponibilité est signalée
- * honnêtement (tools-status + bascule simulation en mode auto).
+ *
+ * P5 « Arsenal » — outils evergreen (adaptateurs génériques arsenal.ts) :
+ *   - Recon : SUBFINDER, AMASS, HTTPX ;
+ *   - DAST : NUCLEI, NIKTO, ZAP ;
+ *   - SAST/SCA : SEMGREP, TRIVY, GITLEAKS ;
+ *   - Exploitation : SQLMAP, FFUF.
+ *
+ * Les plateformes distantes doivent être déclarées via les variables
+ * DEEPAUDIT_API_URL / REDAMON_API_URL (voir README — section « Exécution
+ * réelle »). Les binaires arsenal sont détectés dans le PATH du moteur —
+ * sans installation, l'indisponibilité est signalée honnêtement
+ * (tools-status + bascule simulation en mode auto).
  */
 
+import { ARSENAL_SPECS, makeArsenalAdapter } from "./arsenal";
 import { BasaltAdapter } from "./basalt";
 import { DeepAuditAdapter } from "./deepaudit";
 import { execMode, type ExecMode } from "./env";
@@ -25,6 +34,18 @@ const ADAPTERS: Partial<Record<Tool, () => RealToolAdapter>> = {
   BASALT: () => new BasaltAdapter(),
   DEEPAUDIT: () => new DeepAuditAdapter(),
   REDAMON: () => new RedAmonAdapter(),
+  // P5 — arsenal evergreen (framework générique + specs)
+  SUBFINDER: () => makeArsenalAdapter(ARSENAL_SPECS.SUBFINDER),
+  AMASS: () => makeArsenalAdapter(ARSENAL_SPECS.AMASS),
+  HTTPX: () => makeArsenalAdapter(ARSENAL_SPECS.HTTPX),
+  NUCLEI: () => makeArsenalAdapter(ARSENAL_SPECS.NUCLEI),
+  NIKTO: () => makeArsenalAdapter(ARSENAL_SPECS.NIKTO),
+  ZAP: () => makeArsenalAdapter(ARSENAL_SPECS.ZAP),
+  SEMGREP: () => makeArsenalAdapter(ARSENAL_SPECS.SEMGREP),
+  TRIVY: () => makeArsenalAdapter(ARSENAL_SPECS.TRIVY),
+  GITLEAKS: () => makeArsenalAdapter(ARSENAL_SPECS.GITLEAKS),
+  SQLMAP: () => makeArsenalAdapter(ARSENAL_SPECS.SQLMAP),
+  FFUF: () => makeArsenalAdapter(ARSENAL_SPECS.FFUF),
 };
 
 /** Retourne l'adaptateur réel de l'outil, ou null si non implémenté. */

@@ -2,7 +2,7 @@
  * POST /api/campaigns/[id]/launch — (ré-)exécuter des outils sur une campagne
  * (contrat worklog §F.10 ; sémantique corrigée §L.8)
  *
- * body {tools:Tool[]} (1 à 4 outils) :
+ * body {tools:Tool[]} (1 à 8 outils — P5 arsenal) :
  * - 409 si un outil DEMANDÉ a déjà un scan actif (QUEUED/RUNNING) sur la campagne ;
  * - sinon crée un NOUVEAU scan QUEUED pour CHAQUE outil demandé (ré-exécution,
  *   même si des scans finis de cet outil existent) + campagne → RUNNING ;
@@ -25,7 +25,7 @@ import type { Profile, TargetType, Tool } from '@/lib/types'
 export const dynamic = 'force-dynamic'
 
 const launchSchema = z.object({
-  tools: z.array(z.enum(TOOLS)).min(1).max(4),
+  tools: z.array(z.enum(TOOLS)).min(1).max(8),
 })
 
 export const POST = withApi<{ id: string }>(async (req, { params }) => {

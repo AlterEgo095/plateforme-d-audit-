@@ -1,10 +1,13 @@
 /**
  * AuditForge — Client HTTP vers le moteur d'exécution (:3030, localhost uniquement)
  *
- * Contrats worklog §H + §K.1 :
- * - POST /internal/run    → 202 {ok:true} | 409 {ok:false,error}
- * - POST /internal/cancel → {ok:true} (idempotent)
- * - GET  /internal/health → {ok:true, running:N}
+ * Contrats worklog §H + §K.1 (+ P4 file d'attente) :
+ * - POST /internal/run    → 202 {ok:true, scanStatus:'RUNNING'|'QUEUED'} | 409 {ok:false,error}
+ *   (au-delà du plafond de scans simultanés, le moteur MET EN FILE au lieu de
+ *    rejeter : seules une validation échouée, la saturation de la file ou un
+ *    doublon produisent un 409 → scans marqués FAILED par l'appelant)
+ * - POST /internal/cancel → {ok, where:'running'|'queued'|null} (idempotent)
+ * - GET  /internal/health → {ok:true, running:N, queued?, maxConcurrent?, …}
  * - chaque requête porte l'en-tête `x-internal-token` (ENGINE_INTERNAL_TOKEN)
  */
 import type { EngineRunRequest } from '@/lib/types'

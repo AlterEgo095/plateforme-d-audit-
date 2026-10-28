@@ -17,6 +17,7 @@
 | **Rapports** | Document d'audit formel généré par scan (synthèse exécutive, groupement par sévérité, remédiations), **export PDF via impression** |
 | **Sécurité de la plateforme** | RBAC 3 rôles, sessions signées HMAC-SHA256 (cookie httpOnly), **MFA** (code de démo statique sur les comptes de démo uniquement), rate limiting sur la connexion, en-têtes de sécurité HTTP (CSP…), journal d'audit immuable |
 | **Multi-outils** | 4 moteurs intégrés avec phases, logs et constats propres à chaque outil ; sentinelles de vérification (PoC exécuté en sandbox sans réseau) |
+| **Endurance (P4)** | **File d'attente moteur** — une campagne à 4 outils démarre toujours même au-delà du plafond de scans simultanés (dispatch FIFO à chaque libération, annulable en file) ; scans en file **qui survivent aux redémarrages** ; métriques moteur enrichies (queue, uptime, mémoire) |
 
 ---
 
@@ -230,7 +231,8 @@ docker compose up -d --build
 | `REDAMON_API_URL` / `REDAMON_EMAIL` / `REDAMON_PASSWORD` (engine) | Connexion à la plateforme RedAmon (webapp, ex. `http://redamon-webapp:3000`) | — |
 | `DEMO_SEED` (app) | `1` = créer les comptes de démo (identifiants publics) | `0` en production |
 | `ADMIN_USERNAME` / `ADMIN_PASSWORD` (app) | Premier compte ADMIN créé au premier démarrage (amorçage) | — |
-| `MAX_CONCURRENT_SCANS` (engine) | Plafond global de scans simultanés (protection VPS) | `3` |
+| `MAX_CONCURRENT_SCANS` (engine) | Plafond global de scans simultanés (protection VPS) — **P4 : au-delà, mise en file d'attente FIFO au lieu d'un rejet** | `3` |
+| `MAX_QUEUED_SCANS` (engine) | Capacité de la file d'attente moteur (P4) — au-delà : rejet explicite ; les scans en file **survivent aux redémarrages** (reprise au boot) | `100` |
 | `LOG_RETENTION_DAYS` (engine) | Rétention des journaux de scan en jours (P3 — purges au boot puis chaque 24 h ; 0 désactive ; constats et AuditTrail intacts) | `30` |
 | `SITE_ORIGIN` (engine) | Origine autorisée pour les handshakes socket.io (CORS) | réflexif |
 | `PHANTOM_IMAGE` (engine) | Image sandbox Kali de Phantom (vide = défaut amont) | — |
@@ -287,6 +289,7 @@ Chaque tentative de sauvegarde (succès **ou** échec) écrit `last-backup.json`
 - **Observabilité des sauvegardes (P3)** : `last-backup.json` tracé sur chaque tentative + healthcheck du sidecar (`unhealthy` si échec ou sauvegarde périmée) — une sauvegarde silencieusement morte est détectable dans `docker ps`.
 - **Journal d'audit** immuable : connexion/déconnexion, création/lancement de campagnes, annulations, changements de statut des constats, générations de rapports.
 - **Robustesse** : wrapper d'erreurs uniforme (aucune fuite de stack), récupération au boot (scans orphelins → `FAILED`), arrêt gracieux (SIGTERM → scans finalisés `CANCELLED`), verrous applicatifs par campagne (anti course-critique), sanitization des cibles avant interpolation dans les logs.
+- **File d'attente moteur (P4)** : au-delà du plafond `MAX_CONCURRENT_SCANS`, les scans sont mis en file FIFO et démarrent dès qu'une ressource se libère (plus de scans en échec « trop de scans simultanés » en heure de pointe) ; chaque entrée est re-vérifiée en base avant dispatch (un scan annulé en file ne démarre jamais) ; les scans QUEUED **survivent aux redémarrages** du moteur (re-dispatch au boot — seuls les RUNNING interrompus passent FAILED) ; `/internal/health` expose queue/limites/uptime/mémoire.
 - **Hygiène logicielle (P3)** : `bun audit` sans critique dans les dépendances d'exécution, `overrides` npm pour écraser les transitives vulnérables (lodash), mises à jour semver-revues (next 16.4, react 19.3, prisma 6.19.3, zod 4.6) ; rétention `ScanLog` (`LOG_RETENTION_DAYS`) — la base ne croît plus sans borne.
 
 ---

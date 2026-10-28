@@ -46,10 +46,11 @@ const MAX_ROOMS_PER_SOCKET = 20; // K.4 : plafond de rooms par socket
  * = 150 s (marge au-dessus).
  */
 const SHUTDOWN_GRACE_MS = 90_000;
-// i1 : plafond global de scans exécutés en parallèle (protection VPS — Docker,
-// outils réels et RAM ne sont pas extensibles à l'infini).
-const MAX_CONCURRENT_SCANS = Math.max(1, Number(process.env.MAX_CONCURRENT_SCANS) || 3);
+// i1 : les plafonds de ressources (MAX_CONCURRENT_SCANS / MAX_QUEUED_SCANS)
+// appartiennent désormais à ScanEngine (P4 — file d'attente intégrée).
 const TOOLS_STATUS_TTL_MS = 60_000; // i5 : cache du statut réel des outils (1 min)
+/** P4 : cadence du réveil de la file d'attente (filet si une erreur DB a bloqué le pump). */
+const QUEUE_KICK_MS = 30_000;
 
 const TOOLS: Tool[] = ["PHANTOM", "DEEPAUDIT", "BASALT", "REDAMON"];
 const PROFILES: Profile[] = ["QUICK", "STANDARD", "DEEP"];
@@ -278,14 +279,10 @@ async function route(req: IncomingMessage, res: ServerResponse, engine: ScanEngi
         return;
       }
 
-      // i1 : plafond global de scans simultanés (protection des ressources VPS).
-      if (engine.runningCount() >= MAX_CONCURRENT_SCANS) {
-        sendJson(res, 409, {
-          ok: false,
-          error: `Trop de scans simultanés (limite ${MAX_CONCURRENT_SCANS}) — attendez la fin d'un scan en cours`,
-        });
-        return;
-      }
+      // P4 : au-delà du plafond de scans simultanés, le scan est mis en file
+      // d'attente (FIFO) et démarre dès qu'une ressource se libère — une
+      // campagne à plusieurs outils n'échoue plus en heure de pointe. La file
+      // n'est saturée qu'au-delà de MAX_QUEUED_SCANS (protection mémoire).
 
       // Le scan doit exister en base (404 AVANT le 202) ; campaignId lu en base.
       const scan = await db.scan.findUnique({ where: { id: scanId } });
@@ -302,13 +299,14 @@ async function route(req: IncomingMessage, res: ServerResponse, engine: ScanEngi
         profile: profile as Profile,
         campaignId: scan.campaignId,
       };
+      let where: "RUNNING" | "QUEUED";
       try {
-        engine.run(cfg);
+        where = engine.submit(cfg);
       } catch (err) {
         sendJson(res, 409, { ok: false, error: err instanceof Error ? err.message : String(err) });
         return;
       }
-      sendJson(res, 202, { ok: true });
+      sendJson(res, 202, { ok: true, scanStatus: where });
       return;
     }
 
@@ -325,8 +323,9 @@ async function route(req: IncomingMessage, res: ServerResponse, engine: ScanEngi
         sendJson(res, 400, { ok: false, error: "scanId requis" });
         return;
       }
-      const ok = engine.cancel(scanId);
-      sendJson(res, 200, { ok });
+      // P4 : cancel couvre les scans EN COURS (abort) ET EN FILE (retrait).
+      const where = engine.cancel(scanId);
+      sendJson(res, 200, { ok: where !== null, where });
       return;
     }
 
@@ -336,7 +335,18 @@ async function route(req: IncomingMessage, res: ServerResponse, engine: ScanEngi
         sendJson(res, 401, { ok: false, error: "unauthorized" });
         return;
       }
-      sendJson(res, 200, { ok: true, running: engine.runningCount() });
+      // P4 : métriques enrichies (additives — les champs historiques ok/running
+      // restent identiques pour l'app).
+      sendJson(res, 200, {
+        ok: true,
+        running: engine.runningCount(),
+        queued: engine.queuedCount(),
+        maxConcurrent: engine.maxConcurrent,
+        maxQueued: engine.maxQueued,
+        uptime_s: engine.uptimeSeconds(),
+        mem_mb: Math.round(process.memoryUsage().rss / 1048576),
+        exec_mode: currentExecMode(),
+      });
       return;
     }
 
@@ -399,11 +409,19 @@ async function main(): Promise<void> {
     console.warn("[scan-engine] pragmas SQLite ignorés:", err);
   }
 
-  // ── Récupération au démarrage (N.23) : scans hérités d'un redémarrage ──
-  // RUNNING/QUEUED → FAILED + finishedAt + ScanLog (level ERROR, source 'systeme').
+  // P4 : le moteur est créé AVANT la récupération — la reprise des scans
+  // QUEUED hérités d'un redémarrage passe par sa file d'attente intégrée.
+  const engine = new ScanEngine();
+
+  // ── Récupération au démarrage (N.23 + P4) ──
+  // RUNNING → FAILED : le process outillage est mort avec l'ancien process,
+  // un scan réel interrompu n'est pas reprise (outils stateful).
+  // QUEUED → re-dispatch : ces scans n'avaient jamais démarré — ils retournent
+  // dans la file d'attente et survivent désormais aux redémarrages/déploiements
+  // (complément logique de l'arrêt gracieux P0.4, qui les laisse en QUEUED).
   try {
     const stale = await db.scan.findMany({
-      where: { status: { in: ["RUNNING", "QUEUED"] } },
+      where: { status: "RUNNING" },
       select: { id: true },
     });
     for (const s of stale) {
@@ -428,11 +446,82 @@ async function main(): Promise<void> {
     }
     if (stale.length > 0) {
       console.log(
-        `[scan-engine] récupération : ${stale.length} scan(s) RUNNING/QUEUED marqué(s) FAILED après redémarrage`,
+        `[scan-engine] récupération : ${stale.length} scan(s) RUNNING marqué(s) FAILED après redémarrage`,
       );
     }
   } catch (err) {
     console.warn("[scan-engine] récupération au démarrage impossible:", err);
+  }
+
+  // P4 : re-dispatch des scans QUEUED hérités d'un redémarrage.
+  try {
+    const waiting = await db.scan.findMany({
+      where: { status: "QUEUED" },
+      include: { campaign: { select: { status: true, targetType: true, profile: true } } },
+    });
+    if (waiting.length > 0) {
+      let redisp = 0;
+      let cleaned = 0;
+      for (const s of waiting) {
+        const fail = async (message: string, level: "ERROR" | "WARN"): Promise<void> => {
+          try {
+            await db.scan.update({
+              where: { id: s.id },
+              data: { status: level === "ERROR" ? "FAILED" : "CANCELLED", finishedAt: new Date() },
+            });
+            await db.scanLog.create({
+              data: { scanId: s.id, level, source: "systeme", message },
+            });
+          } catch (err) {
+            console.warn(`[scan-engine] reprise : scan ${s.id} non finalisable:`, err);
+          }
+          cleaned++;
+        };
+        // Campagne annulée pendant l'attente → scan annulé ; campagne dans un
+        // état incohérent (DRAFT/FAILED/COMPLETED) → scan marqué FAILED.
+        if (s.campaign.status === "CANCELLED") {
+          await fail("Campagne annulée pendant l'attente du scan", "WARN");
+          continue;
+        }
+        if (s.campaign.status !== "RUNNING") {
+          await fail(
+            `Campagne en statut ${s.campaign.status} — scan QUEUED orphelin marqué en échec`,
+            "ERROR",
+          );
+          continue;
+        }
+        const target = sanitizeTarget(s.target);
+        const targetError =
+          !target
+            ? "target invalide (vide)"
+            : validateEngineTarget(s.campaign.targetType as TargetType, target);
+        if (targetError) {
+          await fail(`Reprise impossible : ${targetError}`, "ERROR");
+          continue;
+        }
+        try {
+          engine.submit({
+            scanId: s.id,
+            tool: s.tool as Tool,
+            target,
+            targetType: s.campaign.targetType as TargetType,
+            profile: s.campaign.profile as Profile,
+            campaignId: s.campaignId,
+          });
+          redisp++;
+        } catch (err) {
+          // File saturée : le scan RESTE en QUEUED en base — le kick périodique
+          // (QUEUE_KICK_MS) le dépêchera dès qu'une ressource se libère.
+          console.warn(`[scan-engine] reprise : ${s.id} laissé en file (${String(err)})`);
+        }
+      }
+      console.log(
+        `[scan-engine] reprise : ${redisp} scan(s) QUEUED re-dispatché(s)` +
+          (cleaned > 0 ? `, ${cleaned} finalisé(s) (campagne annulée/incohérente ou cible invalide)` : ""),
+      );
+    }
+  } catch (err) {
+    console.warn("[scan-engine] reprise des scans QUEUED impossible:", err);
   }
 
   // P0.5 (audit v2) : réconciliation des campagnes RUNNING orphelines —
@@ -446,7 +535,10 @@ async function main(): Promise<void> {
   // AuditTrail intacts. Voir src/maintenance.ts.
   startLogRetentionScheduler();
 
-  const engine = new ScanEngine();
+  // P4 : réveil périodique de la file d'attente (filet de sécurité — une
+  // erreur DB transitoire au pump est retentée dans les 30 s).
+  const kickTimer = setInterval(() => engine.kick(), QUEUE_KICK_MS);
+  kickTimer.unref();
 
   // socket.io intercepte /socket.io/* ; les autres requêtes (/internal/*)
   // arrivent au handler du serveur HTTP.

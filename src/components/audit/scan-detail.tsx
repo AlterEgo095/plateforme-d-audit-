@@ -117,6 +117,8 @@ export function ScanDetail({
   const liveSeqRef = useRef(0);
   /** Jeton de séquence : ignore les réponses de fetch obsolètes. */
   const seqRef = useRef(0);
+  /** P4 : cleanup du chargement/abonnement différé (annulation à la fermeture). */
+  const cleanupRef = useRef<(() => void) | null>(null);
   const [activeTab, setActiveTab] = useState("terminal");
 
   const refreshScan = useCallback(async (id: string) => {
@@ -131,59 +133,69 @@ export function ScanDetail({
   }, []);
 
   // Chargement à l'ouverture + abonnement à la room du scan.
+  // P4 : exécution différée d'un tick — annulée à la fermeture/démontage avant
+  // démarrage (clearTimeout), les setState sync de reset sortent de la fenêtre
+  // synchrone de l'effet (react-hooks v6 set-state-in-effect).
   useEffect(() => {
     if (!open || !scanId) return;
-    let cancelled = false;
-    const seq = ++seqRef.current;
-    setLoading(true);
-    nearBottomRef.current = true;
-    setLogs([]);
-    void (async () => {
-      try {
-        const [detail, logRes] = await Promise.all([
-          apiGet<ScanDetailData>(`/api/scans/${scanId}`),
-          apiGet<{ logs: LogEntry[] }>(`/api/scans/${scanId}/logs?limit=500`),
-        ]);
-        if (cancelled || seq !== seqRef.current) return; // réponse obsolète
-        setData(detail);
-        // Fusion (pas remplacement) : on conserve les logs live (id < 0)
-        // reçus pendant le chargement qui sont PLUS RÉCENTS que le dernier
-        // log persisté, pour éviter les doublons au moment de la fusion.
-        const fetched = logRes.logs;
-        const maxFetchedTs = fetched.reduce((max, l) => {
-          const t = new Date(l.ts).getTime();
-          return Number.isNaN(t) ? max : Math.max(max, t);
-        }, 0);
-        setLogs((prev) => {
-          const live = prev.filter((l) => {
-            if (l.id >= 0) return false;
-            const t = new Date(l.ts).getTime();
-            return !Number.isNaN(t) && t > maxFetchedTs;
+    const t = setTimeout(() => {
+      let cancelled = false;
+      const seq = ++seqRef.current;
+      setLoading(true);
+      nearBottomRef.current = true;
+      setLogs([]);
+      void (async () => {
+        try {
+          const [detail, logRes] = await Promise.all([
+            apiGet<ScanDetailData>(`/api/scans/${scanId}`),
+            apiGet<{ logs: LogEntry[] }>(`/api/scans/${scanId}/logs?limit=500`),
+          ]);
+          if (cancelled || seq !== seqRef.current) return; // réponse obsolète
+          setData(detail);
+          // Fusion (pas remplacement) : on conserve les logs live (id < 0)
+          // reçus pendant le chargement qui sont PLUS RÉCENTS que le dernier
+          // log persisté, pour éviter les doublons au moment de la fusion.
+          const fetched = logRes.logs;
+          const maxFetchedTs = fetched.reduce((max, l) => {
+            const tt = new Date(l.ts).getTime();
+            return Number.isNaN(tt) ? max : Math.max(max, tt);
+          }, 0);
+          setLogs((prev) => {
+            const live = prev.filter((l) => {
+              if (l.id >= 0) return false;
+              const tt = new Date(l.ts).getTime();
+              return !Number.isNaN(tt) && tt > maxFetchedTs;
+            });
+            return [...fetched, ...live].sort(
+              (a, b) =>
+                new Date(a.ts).getTime() - new Date(b.ts).getTime()
+            );
           });
-          return [...fetched, ...live].sort(
-            (a, b) =>
-              new Date(a.ts).getTime() - new Date(b.ts).getTime()
-          );
-        });
-      } catch (e) {
-        if (!cancelled && seq === seqRef.current) {
-          toast({
-            title: "Erreur",
-            description: getErrorMessage(e),
-            variant: "destructive",
-          });
+        } catch (e) {
+          if (!cancelled && seq === seqRef.current) {
+            toast({
+              title: "Erreur",
+              description: getErrorMessage(e),
+              variant: "destructive",
+            });
+          }
+        } finally {
+          if (!cancelled && seq === seqRef.current) setLoading(false);
         }
-      } finally {
-        if (!cancelled && seq === seqRef.current) setLoading(false);
-      }
-    })();
-    // L'abonnement attend le socket asynchrone (auth token + handshake).
-    void ensureSocket().then(() => {
-      if (!cancelled) subscribeScan(scanId);
-    });
+      })();
+      // L'abonnement attend le socket asynchrone (auth token + handshake).
+      void ensureSocket().then(() => {
+        if (!cancelled) subscribeScan(scanId);
+      });
+      cleanupRef.current = () => {
+        cancelled = true;
+        unsubscribeScan(scanId);
+      };
+    }, 0);
     return () => {
-      cancelled = true;
-      unsubscribeScan(scanId);
+      clearTimeout(t);
+      cleanupRef.current?.();
+      cleanupRef.current = null;
     };
   }, [open, scanId, toast]);
 
@@ -533,8 +545,10 @@ export function ScanDetail({
         </SheetContent>
       </Sheet>
 
-      {/* Détail d'une vulnérabilité (au-dessus du détail de scan) */}
+      {/* Détail d'une vulnérabilité (au-dessus du détail de scan)
+          — key : remonte le composant à chaque sélection (état local neuf) */}
       <FindingDetail
+        key={selectedFinding?.id ?? "none"}
         finding={selectedFinding}
         open={selectedFinding !== null}
         onOpenChange={(o) => !o && setSelectedFinding(null)}

@@ -68,8 +68,12 @@ export function AuditLogView() {
     }
   }, [toast]);
 
+  // P4 : chargement différé d'un tick — annulé au démontage ; le chemin
+  // catch/toast de load() reste hors de la fenêtre synchrone de l'effet
+  // (react-hooks v6 set-state-in-effect).
   useEffect(() => {
-    void load();
+    const t = setTimeout(() => void load(), 0);
+    return () => clearTimeout(t);
   }, [load]);
 
   return (

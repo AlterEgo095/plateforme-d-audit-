@@ -201,9 +201,18 @@ export interface EngineRunRequest {
 export interface EngineRunResponse {
   ok: boolean;
   error?: string;
+  /** P4 (file d'attente) : statut d'exécution résultant de la soumission. */
+  scanStatus?: "RUNNING" | "QUEUED";
 }
 
 export interface EngineHealth {
   ok: boolean;
   running: number;
+  /** P4 (file d'attente) : métriques additives du moteur. */
+  queued?: number;
+  maxConcurrent?: number;
+  maxQueued?: number;
+  uptime_s?: number;
+  mem_mb?: number;
+  exec_mode?: "simulation" | "auto" | "real";
 }

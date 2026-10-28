@@ -117,8 +117,10 @@ export function FindingsView({ user }: { user: UserDTO }) {
     }
   }, [debouncedQ, severity, tool, status, toast]);
 
+  // P4 : chargement différé d'un tick — annulé au démontage (voir audit-log-view).
   useEffect(() => {
-    void load();
+    const t = setTimeout(() => void load(), 0);
+    return () => clearTimeout(t);
   }, [load]);
 
   // Une nouvelle vulnérabilité arrive en temps réel → rafraîchit la liste.
@@ -313,8 +315,9 @@ export function FindingsView({ user }: { user: UserDTO }) {
         </CardContent>
       </Card>
 
-      {/* Détail */}
+      {/* Détail — key : remonte le composant à chaque sélection (état local neuf) */}
       <FindingDetail
+        key={selected?.id ?? "none"}
         finding={selected}
         open={selected !== null}
         onOpenChange={(o) => !o && setSelected(null)}

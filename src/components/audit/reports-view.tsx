@@ -87,8 +87,10 @@ export function ReportsView({
     }
   }, []);
 
+  // P4 : chargement différé d'un tick — annulé au démontage (voir audit-log-view).
   useEffect(() => {
-    void loadList();
+    const t = setTimeout(() => void loadList(), 0);
+    return () => clearTimeout(t);
   }, [loadList]);
 
   const generate = useCallback(
@@ -118,10 +120,15 @@ export function ReportsView({
   );
 
   // Ouverture dirigée depuis un scan terminé (détail de scan / vue scans).
+  // P4 : génération différée d'un tick — annulée au démontage / re-direction
+  // (les setState sync de generate() sortent de la fenêtre synchrone).
   useEffect(() => {
     if (scanReportId) {
-      void generate(scanReportId);
-      onConsumeReportId?.();
+      const t = setTimeout(() => {
+        void generate(scanReportId);
+        onConsumeReportId?.();
+      }, 0);
+      return () => clearTimeout(t);
     }
   }, [scanReportId, generate, onConsumeReportId]);
 

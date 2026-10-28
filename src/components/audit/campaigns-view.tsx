@@ -133,8 +133,10 @@ export function CampaignsView({
     }
   }, []);
 
+  // P4 : chargement différé d'un tick — annulé au démontage (voir audit-log-view).
   useEffect(() => {
-    void load();
+    const t = setTimeout(() => void load(), 0);
+    return () => clearTimeout(t);
   }, [load]);
 
   useScanEvents(() => {
@@ -505,12 +507,16 @@ function CreateCampaignDialog({
   );
 
   // Retire les outils devenus incompatibles quand le type de cible change.
+  // P4 : retrait différé d'un tick — annulé si le type re-change (react-hooks v6).
   useEffect(() => {
-    setTools((prev) =>
-      prev.filter((t) =>
-        compatibleTools.find((meta) => meta.id === t)?.compatible
-      )
-    );
+    const t = setTimeout(() => {
+      setTools((prev) =>
+        prev.filter((tool) =>
+          compatibleTools.find((meta) => meta.id === tool)?.compatible
+        )
+      );
+    }, 0);
+    return () => clearTimeout(t);
   }, [compatibleTools]);
 
   const reset = () => {

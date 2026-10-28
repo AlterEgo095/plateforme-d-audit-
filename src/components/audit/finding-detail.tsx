@@ -5,7 +5,7 @@
  * Utilisé par la vue Vulnérabilités et par le détail de scan.
  */
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { Loader2, Wrench } from "lucide-react";
 import {
   Sheet,
@@ -58,11 +58,10 @@ export function FindingDetail({
   const status = finding ? (localStatus ?? finding.status) : null;
   const canEdit = user !== null && user.role !== "VIEWER";
 
-  // Nouvelle vulnérabilité sélectionnée : réinitialise le statut local
-  // (sinon l'optimiste du précédent finding fuyait sur le suivant).
-  useEffect(() => {
-    setLocalStatus(null);
-  }, [finding?.id]);
+  // P4 : la réinitialisation du statut local à chaque changement de constat
+  // est assurée par la CLÉ React posée par les parents (key={finding?.id}) —
+  // le composant est remonté à chaque sélection, état local neuf (le statut
+  // optimiste d'un constat ne fuit plus sur le suivant, sans effet de synchro).
 
   const updateStatus = async (newStatus: FindingStatus) => {
     if (!finding) return;

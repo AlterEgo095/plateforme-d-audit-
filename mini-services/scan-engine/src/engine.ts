@@ -57,6 +57,14 @@ import type {
 /** Paramètres d'exécution : la requête interne + le campaignId lu en base (N.22). */
 export type EngineRunParams = EngineRunRequest & { campaignId: string };
 
+// ─── Limites de ressources (P4 — audit v2) ────────────────────────────
+
+/** Lit un entier d'environnement avec bornes (fallback défaut si absent/invalide). */
+function envLimit(name: string, def: number, min: number): number {
+  const n = Number(process.env[name]);
+  return Number.isFinite(n) && n >= min ? Math.floor(n) : def;
+}
+
 // ─── Utilitaires RNG déterministes ────────────────────────────────────
 
 /** FNV-1a 32 bits — graine déterministe dérivée du scanId. */
@@ -195,9 +203,49 @@ function selectFindings(cfg: EngineRunRequest): FindingTemplate[] {
 export class ScanEngine {
   private running = new Map<string, RunningEntry>();
 
-  /** Lance un scan. Lève Error('scan already running') si déjà en cours. */
-  run(cfg: EngineRunParams): void {
-    if (this.running.has(cfg.scanId)) throw new Error("scan already running");
+  /** P4 : file d'attente FIFO — les scans soumis au-delà du plafond y patientent. */
+  private queue: Array<{ cfg: EngineRunParams; enqueuedAt: number }> = [];
+  private pumping = false;
+
+  /** Plafond de scans exécutés en parallèle (protection VPS — MAX_CONCURRENT_SCANS). */
+  readonly maxConcurrent: number;
+  /** Capacité de la file d'attente (MAX_QUEUED_SCANS). */
+  readonly maxQueued: number;
+  private readonly bootAt = Date.now();
+
+  constructor(
+    maxConcurrent = envLimit("MAX_CONCURRENT_SCANS", 3, 1),
+    maxQueued = envLimit("MAX_QUEUED_SCANS", 100, 1),
+  ) {
+    this.maxConcurrent = maxConcurrent;
+    this.maxQueued = maxQueued;
+  }
+
+  /**
+   * P4 : soumission d'un scan — démarrage immédiat si une ressource est libre,
+   * sinon mise en file d'attente FIFO (dispatch à chaque libération). Lève
+   * Error si le scan est déjà en cours/en file, ou si la file est saturée.
+   * Retourne le statut d'exécution résultant ('RUNNING' | 'QUEUED').
+   */
+  submit(cfg: EngineRunParams): "RUNNING" | "QUEUED" {
+    if (this.running.has(cfg.scanId) || this.queue.some((q) => q.cfg.scanId === cfg.scanId)) {
+      throw new Error("scan already running or queued");
+    }
+    if (this.running.size < this.maxConcurrent) {
+      this.start(cfg);
+      return "RUNNING";
+    }
+    if (this.queue.length >= this.maxQueued) {
+      throw new Error(
+        `File d'attente saturée (${this.maxQueued}) — augmentez MAX_QUEUED_SCANS ou attendez la fin des scans en cours`,
+      );
+    }
+    this.queue.push({ cfg, enqueuedAt: Date.now() });
+    return "QUEUED";
+  }
+
+  /** Démarre réellement un scan (ancien corps de run()). */
+  private start(cfg: EngineRunParams): void {
     let resolveDone: () => void = () => undefined;
     const done = new Promise<void>((resolve) => {
       resolveDone = resolve;
@@ -210,15 +258,75 @@ export class ScanEngine {
         // Filet de sécurité (les 3 chemins nettoient déjà la Map — delete idempotent).
         this.running.delete(cfg.scanId);
         ctrl.resolveDone();
+        // P4 : une ressource vient de se libérer — dépile la file d'attente.
+        this.pump();
       });
   }
 
-  /** Demande l'annulation d'un scan en cours. true si le scan était actif. */
-  cancel(scanId: string): boolean {
+  /**
+   * P4 : dépile la file d'attente tant que des ressources sont libres.
+   * Chaque entrée est re-vérifiée en base AVANT démarrage : un scan annulé
+   * (CANCELLED), supprimé ou déjà terminal pendant son attente est écarté.
+   * En cas d'erreur DB (SQLite brièvement occupé), la tête est CONSERVÉE et le
+   * pump retentera au prochain déclencheur (fin de scan, submit, kick 30 s).
+   */
+  private pump(): void {
+    if (this.pumping) return;
+    this.pumping = true;
+    void (async () => {
+      try {
+        while (this.running.size < this.maxConcurrent && this.queue.length > 0) {
+          const head = this.queue[0];
+          let status: string | null;
+          try {
+            const row = await db.scan.findUnique({
+              where: { id: head.cfg.scanId },
+              select: { status: true },
+            });
+            status = row?.status ?? null;
+          } catch (err) {
+            console.warn(
+              `[engine] file : vérification de ${head.cfg.scanId} impossible — retentera plus tard`,
+              err,
+            );
+            break; // tête conservée — nouvelle tentative au prochain déclencheur
+          }
+          this.queue.shift(); // vérification faite : l'entrée sort de la file (dans tous les cas)
+          if (status === "QUEUED") {
+            this.start(head.cfg);
+          } else if (status !== null) {
+            console.log(
+              `[engine] file : scan ${head.cfg.scanId} écarté (statut base : ${status})`,
+            );
+          }
+        }
+      } finally {
+        this.pumping = false;
+      }
+    })();
+  }
+
+  /** P4 : réveille le dispatch (timer de sécurité — file bloquée par une erreur DB). */
+  kick(): void {
+    if (this.queue.length > 0) this.pump();
+  }
+
+  /**
+   * Demande l'annulation : scan en cours → abort ; en file d'attente → retiré
+   * de la file. Retourne l'emplacement trouvé (null si inconnu du moteur).
+   */
+  cancel(scanId: string): "running" | "queued" | null {
     const ctrl = this.running.get(scanId);
-    if (!ctrl) return false;
-    ctrl.aborted = true;
-    return true;
+    if (ctrl) {
+      ctrl.aborted = true;
+      return "running";
+    }
+    const idx = this.queue.findIndex((q) => q.cfg.scanId === scanId);
+    if (idx >= 0) {
+      this.queue.splice(idx, 1);
+      return "queued";
+    }
+    return null;
   }
 
   /**
@@ -239,6 +347,16 @@ export class ScanEngine {
 
   runningCount(): number {
     return this.running.size;
+  }
+
+  /** P4 : nombre de scans en attente de ressources. */
+  queuedCount(): number {
+    return this.queue.length;
+  }
+
+  /** P4 : durée de vie du process (s) — métriques /internal/health. */
+  uptimeSeconds(): number {
+    return Math.round((Date.now() - this.bootAt) / 1000);
   }
 
   // ── Boucle principale ──

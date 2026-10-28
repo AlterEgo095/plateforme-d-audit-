@@ -94,8 +94,11 @@ export function ScansView({
   const knownIdsRef = useRef<Set<string>>(new Set());
 
   // Synchronise le filtre de campagne quand il change depuis l'extérieur.
+  // P4 : différé d'un tick (react-hooks v6 — setState hors fenêtre synchrone).
   useEffect(() => {
-    if (initialCampaignId) setCampaignFilter(initialCampaignId);
+    if (!initialCampaignId) return;
+    const t = setTimeout(() => setCampaignFilter(initialCampaignId), 0);
+    return () => clearTimeout(t);
   }, [initialCampaignId]);
 
   const load = useCallback(async () => {
@@ -126,8 +129,10 @@ export function ScansView({
     }
   }, [campaignFilter, statusFilter, toast]);
 
+  // P4 : chargement différé d'un tick — annulé au démontage (voir audit-log-view).
   useEffect(() => {
-    void load();
+    const t = setTimeout(() => void load(), 0);
+    return () => clearTimeout(t);
   }, [load]);
 
   // Liste des campagnes (pour le filtre).

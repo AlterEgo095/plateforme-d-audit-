@@ -107,8 +107,10 @@ export function DashboardView({
     }
   }, []);
 
+  // P4 : chargement différé d'un tick — annulé au démontage (voir audit-log-view).
   useEffect(() => {
-    void load();
+    const t = setTimeout(() => void load(), 0);
+    return () => clearTimeout(t);
   }, [load]);
 
   // Rafraîchissement différée (800 ms) dès qu'un événement de scan arrive.

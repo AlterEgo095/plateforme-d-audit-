@@ -19,12 +19,8 @@ const eslintConfig = [...nextCoreWebVitals, ...nextTypescript, {
     // React rules
     "react-hooks/exhaustive-deps": "off",
     "react-hooks/purity": "off",
-    // P3 (audit v2) : règle react-hooks v6 trop bruyante sur les patterns
-    // légitimes du projet (chargement async « void load() » dans useEffect,
-    // hooks shadcn/ui stock — use-mobile, carousel). Migration à prévoir dans
-    // une tâche dédiée (refactor des 10 sites vers useSyncExternalStore /
-    // chargement post-await), pas dans un lot d'hygiène.
-    "react-hooks/set-state-in-effect": "off",
+    // P4 (audit v2) : règle react-hooks v6 RÉACTIVÉE — les 10 sites historiques
+    // ont été migrés (chargement async post-await, useSyncExternalStore).
     "react/no-unescaped-entities": "off",
     "react/display-name": "off",
     "react/prop-types": "off",

@@ -41,6 +41,10 @@ const nextConfig: NextConfig = {
       },
     ];
   },
+  // Dev-only : le sandbox accède à l'app via 127.0.0.1 — sans ceci, Next 16
+  // bloque les upgrades WebSocket /_next/hmr (cross-origin) et l'hydratation
+  // React reste bloquée sur l'écran de boot (canal debug RSC sur le WS HMR).
+  allowedDevOrigins: ["127.0.0.1", "localhost"],
 };
 
 export default nextConfig;

@@ -403,7 +403,7 @@ function ToolCard({ tool }: { tool: ToolInfo }) {
 
         <div className="flex flex-wrap gap-1.5">
           {tool.capabilities.map((cap) => (
-            <Badge key={cap} variant="outline" className="font-mono text-[10px]">
+            <Badge key={cap} variant="outline" className="font-mono text-[10px] whitespace-normal [overflow-wrap:anywhere]">
               {cap}
             </Badge>
           ))}

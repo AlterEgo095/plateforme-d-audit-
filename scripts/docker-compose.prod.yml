@@ -126,7 +126,7 @@ services:
   engine:
     build:
       context: .
-      dockerfile: Dockerfile.engine
+      dockerfile: scripts/Dockerfile.engine
     environment:
       NODE_ENV: production
       DATABASE_URL: file:/data/auditforge.db

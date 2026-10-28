@@ -9,7 +9,12 @@
 # cache de modules — image plus légère, couches reconstructibles, build Go
 # mis en cache indépendamment du code moteur. WITH_ARSENAL=0 (défaut) saute
 # la compilation : /arsenal-bin reste vide, aucune binaire copié.
-FROM golang:1.23-alpine AS go-builder
+# NB : golang:1-alpine (et non 1.23) — les outils @latest (subfinder v2.17,
+# nuclei v3, amass v4…) montent régulièrement leur go.mod minimum ; épingler
+# une version cassait le build à chaque montée amont. GOTOOLCHAIN=auto laisse
+# la toolchain se télécharger seule si un module exige encore plus récent.
+FROM golang:1-alpine AS go-builder
+ENV GOTOOLCHAIN=auto
 ARG WITH_ARSENAL=0
 RUN mkdir -p /arsenal-bin
 RUN if [ "$WITH_ARSENAL" = "1" ]; then set -eux; \
@@ -112,15 +117,22 @@ RUN sed -i 's/priority_tools=\["nmap", "httpx", "nuclei", "sqlmap", "ffuf", "nik
 ARG WITH_ARSENAL=0
 RUN if [ "$WITH_ARSENAL" = "1" ]; then set -eux; \
       apt-get update -y \
-      && apt-get install -y --no-install-recommends nikto sqlmap wget unzip \
+      && apt-get install -y --no-install-recommends sqlmap wget unzip libnet-ssleay-perl libxml-writer-perl \
       && pip install --no-cache-dir semgrep \
-      && wget -qO /tmp/trivy.tgz https://github.com/aquasecurity/trivy/releases/latest/download/trivy_Linux-64bit.tar.gz \
+      && TRIVY_URL="$( (wget -qO- https://api.github.com/repos/aquasecurity/trivy/releases/latest || true) | sed -n 's/.*"browser_download_url": *"\(https:[^"]*Linux-64bit\.tar\.gz\)".*/\1/p' | head -1)" \
+      && [ -n "$TRIVY_URL" ] \
+      && wget -qO /tmp/trivy.tgz "$TRIVY_URL" \
       && tar -xzf /tmp/trivy.tgz -C /usr/local/bin trivy && rm /tmp/trivy.tgz \
-      && GL_VER="$(wget -qO- https://api.github.com/repos/gitleaks/gitleaks/releases/latest | sed -n 's/.*"tag_name": *"v\([^"]*\)".*/\1/p' | head -1)" \
-      && [ -n "$GL_VER" ] || { echo "gitleaks : version amont illisible" >&2; exit 1; } \
+      && git clone --depth 1 https://github.com/sullo/nikto.git /opt/nikto \
+      && ln -sf /opt/nikto/program/nikto.pl /usr/local/bin/nikto \
+      && chmod 0755 /opt/nikto/program/nikto.pl \
+      && nikto -Version \
+      && GL_VER="$( (wget -qO- https://api.github.com/repos/gitleaks/gitleaks/releases/latest || true) | sed -n 's/.*"tag_name": *"v\([^"]*\)".*/\1/p' | head -1)" \
+      && if [ -z "$GL_VER" ]; then GL_VER="$(git ls-remote --tags https://github.com/gitleaks/gitleaks.git | grep -v '\^{}' | sed 's/.*refs\/tags\/v//' | grep -E '^[0-9][0-9.]*$' | sort -V | tail -1)"; fi \
+      && [ -n "$GL_VER" ] \
       && wget -qO /tmp/gitleaks.tgz "https://github.com/gitleaks/gitleaks/releases/download/v${GL_VER}/gitleaks_${GL_VER}_linux_x64.tar.gz" \
       && tar -xzf /tmp/gitleaks.tgz -C /usr/local/bin gitleaks && rm /tmp/gitleaks.tgz \
-      && rm -rf /var/lib/apt/lists/* /root/.cache; \
+      && rm -rf /var/lib/apt/lists/* /root/.cache /opt/nikto/.git; \
     fi
 COPY --from=go-builder /arsenal-bin/ /arsenal-bin/
 RUN if [ "$WITH_ARSENAL" = "1" ]; then set -eux; \

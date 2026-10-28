@@ -82,3 +82,15 @@ EXPOSE 3030
 # compose uniquement — le port n'est jamais publié sur l'hôte).
 # exec direct (sans `bun run`) : SIGTERM délivré au processus → arrêt gracieux.
 CMD ["bun", "src/index.ts"]
+
+# ── Santé (P2 audit v2) ─────────────────────────────────────────────────────
+# /internal/health exige le token interne (contrat K.1) : il est fourni au
+# conteneur par docker-compose (ENGINE_INTERNAL_TOKEN, même valeur que l'app)
+# et développé par le shell AU RUNTIME (jamais inscrit dans l'image).
+# curl échoue (exit ≠ 0) sur timeout, connexion refusée ou statut ≥ 400
+# (401 = token faux → conteneur signalé unhealthy, caddy ne démarrera pas).
+# curl est installé plus haut (repo Docker CLI). start_period couvre le boot
+# (bun + connexion Prisma) ; interval 15 s ≈ détection d'un moteur bloqué < 1 min.
+HEALTHCHECK --interval=15s --timeout=5s --start-period=20s --retries=5 \
+  CMD curl -sf -H "x-internal-token: ${ENGINE_INTERNAL_TOKEN}" \
+        http://127.0.0.1:3030/internal/health || exit 1

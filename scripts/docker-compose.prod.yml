@@ -8,8 +8,29 @@
 # Architecture réseau : seul Caddy est exposé (80/443). `app`, `engine`,
 # `docker-proxy` et `llm-bridge` vivent sur le réseau interne Docker — aucun
 # n'est publié sur l'hôte.
+#
+# P2 (audit plateforme v2) — confinement & robustesse opérationnelle :
+#   - healthcheck du MOTEUR (Dockerfile.engine) ; caddy n'attend plus un simple
+#     « démarré » mais un moteur effectivement sain (service_healthy) ;
+#   - limites de ressources par conteneur (mem_limit/cpus/pids_limit) — un
+#     dérèglement (fuite mémoire, fork bomb) ne peut plus affamer le VPS ;
+#     les sandboxes tournent côté démon HÔTE (hors plafond du moteur) ;
+#   - rotation des logs json-file (10 Mo × 3) — /var/lib/docker ne croît plus
+#     sans borne (le moteur est verbeux pendant les scans) ;
+#   - confinement : no-new-privileges partout, cap_drop ALL (sauf
+#     NET_BIND_SERVICE pour caddy 80/443) ;
+#   - segmentation réseau : `edge` (exposition), `data` (app ⇄ moteur,
+#     interne), `docker-ctrl` (moteur ⇄ proxy Docker, interne) ; le sidecar
+#     `backup` n'a AUCUNE interface réseau (network_mode: none).
 
 name: auditforge
+
+# Rotation des logs — commune à tous les services (ancre YAML).
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
 
 services:
   # ── Application Next.js : frontend + API REST ─────────────────────────────
@@ -32,6 +53,15 @@ services:
     volumes:
       - auditforge-data:/data
     restart: unless-stopped
+    # ── P2 : confinement & ressources ──
+    logging: *default-logging
+    security_opt:
+      - no-new-privileges:true # aucun binaire setuid ne peut prendre des privilèges
+    cap_drop: [ALL] # serveur Node non privilégié : aucune capability requise
+    mem_limit: ${APP_MEM_LIMIT:-512m}
+    cpus: "${APP_CPUS:-1.0}"
+    pids_limit: 512
+    networks: [edge, data]
     # Aucun `ports:` : l'application n'est joignable que via le reverse proxy.
 
   # ── Proxy Docker (P0.3 audit v2) — remplace le docker.sock brut du moteur ──
@@ -70,6 +100,15 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
     restart: unless-stopped
+    # ── P2 : confinement & ressources ──
+    logging: *default-logging
+    security_opt:
+      - no-new-privileges:true
+    # Pas de cap_drop ici : image tierce (haproxy) — durcissement conservateur.
+    mem_limit: 128m
+    cpus: "0.5"
+    pids_limit: 256
+    networks: [docker-ctrl]
     # P1 : healthcheck /_ping — le moteur n'attend plus un simple « démarré »
     # mais un proxy effectivement joignable (scans réels opérationnels au boot).
     healthcheck:
@@ -79,8 +118,9 @@ services:
       retries: 6
       start_period: 10s
     # Aucun `ports:` : l'API du proxy n'est joignable que sur le réseau interne
-    # (tcp://docker-proxy:2375). NB : ne PAS publier 2375 sur une IP gateway —
-    # le hairpin NAT échoue depuis les conteneurs (i/o timeout).
+    # `docker-ctrl` (tcp://docker-proxy:2375) — UNIQUEMENT depuis le moteur.
+    # NB : ne PAS publier 2375 sur une IP gateway — le hairpin NAT échoue
+    # depuis les conteneurs (i/o timeout).
 
   # ── Moteur d'exécution des scans (socket.io + /internal/* + outils réels) ──
   engine:
@@ -137,6 +177,18 @@ services:
       # proxy interne `docker-proxy` (voir service ci-dessus).
     restart: unless-stopped
     stop_grace_period: 150s # P0.4 : SHUTDOWN_GRACE_MS=90s + marge (audit v2)
+    # ── P2 : confinement & ressources ──
+    # NB : les sandboxes Phantom/Basalt sont des conteneurs du DÉMON hôte
+    # (créés via docker-proxy) — leur empreinte mémoire/CPU n'est PAS plafonnée
+    # par les limites ci-dessous (voir README, section ressources).
+    logging: *default-logging
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL] # écoute 3030 (>1024) + CLI docker via TCP : aucune capability
+    mem_limit: ${ENGINE_MEM_LIMIT:-2g}
+    cpus: "${ENGINE_CPUS:-2.0}"
+    pids_limit: 1024 # CLI docker + sous-processus python des outils réels
+    networks: [edge, data, docker-ctrl]
     depends_on:
       app:
         condition: service_healthy # le schéma est appliqué au boot de `app`
@@ -163,6 +215,17 @@ services:
       # Répertoire hôte des sauvegardes (survolable : ls -lh /opt/auditforge/backups)
       - ${BACKUP_HOST_DIR:-/opt/auditforge/backups}:/backups
     restart: unless-stopped
+    # ── P2 : confinement & ressources ──
+    logging: *default-logging
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL] # sqlite3 + cp sur fichiers dont il est propriétaire : OK
+    mem_limit: ${BACKUP_MEM_LIMIT:-128m}
+    cpus: "0.5"
+    pids_limit: 128
+    # P2 : AUCUNE interface réseau — le sidecar ne touche qu'au système de
+    # fichiers (/data → /backups). Surface d'attaque réseau : zéro.
+    network_mode: none
     depends_on:
       app:
         condition: service_healthy # la base existe (schéma appliqué)
@@ -179,6 +242,12 @@ services:
   #     LLM_BRIDGE_KEY: ${LLM_BRIDGE_KEY:-}
   #     BIND_HOST: 0.0.0.0
   #   restart: unless-stopped
+  #   # P2 : confinement & ressources (aligné sur les services actifs)
+  #   logging: *default-logging
+  #   security_opt: [no-new-privileges:true]
+  #   cap_drop: [ALL]
+  #   mem_limit: 256m
+  #   networks: [data] # joignable du moteur uniquement (http://llm-bridge:3031/v1)
 
   # ── Reverse proxy : unique point d'entrée (80/443) ────────────────────────
   caddy:
@@ -193,13 +262,41 @@ services:
       - caddy-data:/data
       - caddy-config:/config
     restart: unless-stopped
+    # ── P2 : confinement & ressources ──
+    logging: *default-logging
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    cap_add:
+      - NET_BIND_SERVICE # seule capability requise : écoute 80/443
+    mem_limit: ${CADDY_MEM_LIMIT:-256m}
+    cpus: "${CADDY_CPUS:-1.0}"
+    pids_limit: 256
+    networks: [edge]
     depends_on:
       app:
         condition: service_healthy
+      # P2 : le healthcheck du moteur (Dockerfile.engine) est fiable — caddy
+      # ne publie 80/443 qu'une fois socket.io + /internal/* réellement servis.
       engine:
-        condition: service_started
+        condition: service_healthy
 
 volumes:
   auditforge-data: # base SQLite partagée (app ⇄ moteur, mode WAL)
   caddy-data: # certificats TLS (HTTPS automatique)
   caddy-config:
+
+# ── P2 : segmentation réseau ──────────────────────────────────────────────────
+# edge        : exposition — caddy ⇄ app (HTTP) et caddy ⇄ engine (socket.io).
+#               Seul réseau avec sortie Internet (route par défaut).
+# data        : app ⇄ moteur (API /internal) — `internal: true`, aucun accès
+#               externe.
+# docker-ctrl : moteur ⇄ docker-proxy — plan de contrôle Docker isolé ; le
+#               proxy n'est joignable d'AUCUN autre service.
+networks:
+  edge:
+    driver: bridge
+  data:
+    internal: true
+  docker-ctrl:
+    internal: true

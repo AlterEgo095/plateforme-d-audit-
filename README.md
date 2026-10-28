@@ -237,6 +237,10 @@ docker compose up -d --build
 | `DOCKER_HOST` (engine) | Endpoint Docker des sandboxes — posé par le compose vers le proxy filtrant | `tcp://docker-proxy:2375` |
 | `BACKUP_HOST_DIR` (backup) | Répertoire hôte des sauvegardes planifiées (sidecar `backup`) | `/opt/auditforge/backups` |
 | `BACKUP_KEEP` / `BACKUP_INTERVAL_SECONDS` (backup) | Rotation (nombre) et période (s) des sauvegardes | `7` / `86400` |
+| `APP_MEM_LIMIT` / `APP_CPUS` (app) | Plafonds mémoire / CPU du conteneur applicatif (P2) | `512m` / `1.0` |
+| `ENGINE_MEM_LIMIT` / `ENGINE_CPUS` (engine) | Plafonds mémoire / CPU du moteur (P2 — les sandboxes sont hors plafond, côté démon hôte) | `2g` / `2.0` |
+| `CADDY_MEM_LIMIT` / `CADDY_CPUS` (caddy) | Plafonds mémoire / CPU du reverse proxy (P2) | `256m` / `1.0` |
+| `BACKUP_MEM_LIMIT` (backup) | Plafond mémoire du sidecar de sauvegarde (P2) | `128m` |
 
 ### Sauvegarde et restauration (P0-1 + P1)
 
@@ -259,6 +263,9 @@ docker compose up -d --build
 - **Token interne** `x-internal-token` exigé par chaque route `/internal/*` du moteur (les API d'orchestration ne sont pas exposées publiquement).
 - **Socket.io authentifié au handshake** : cookie de session **ou** token signé (`GET /api/auth/socket-token`), rooms plafonnées (20/socket).
 - **Confinement réseau** (Docker) : seul Caddy est publié ; le moteur n'écoute que sur le réseau interne et jamais sur l'hôte ; en local, il n'écoute que sur `127.0.0.1`. Le démon Docker de l'hôte n'est jamais exposé au moteur en brut : **proxy Docker filtrant** (`docker-proxy` — endpoints sandboxes uniquement, build/exec/secrets/swarm refusés, healthcheck P1 : le moteur ne démarre que si le proxy répond).
+- **Segmentation réseau (P2)** : trois réseaux Docker dédiés — `edge` (seul à sortir sur Internet), `data` (app ⇄ moteur, `internal: true`) et `docker-ctrl` (moteur ⇄ proxy Docker, `internal: true`) ; le sidecar `backup` n'a **aucune interface réseau** (`network_mode: none`) — fin du réseau plat où tout service joignait tout.
+- **Confinement des conteneurs (P2)** : `no-new-privileges:true` sur **tous** les services, `cap_drop: ALL` (caddy ne conserve que `NET_BIND_SERVICE` pour écouter 80/443), plafonds `mem_limit`/`cpus`/`pids_limit` paramétrables (un dérèglement ne peut plus affamer le VPS), rotation des logs conteneurs (`json-file` 10 Mo × 3 — `/var/lib/docker` cesse de croître sans borne).
+- **Healthchecks de bout en bout** : app (`/api/auth/me`), proxy Docker (`/_ping`, P1) et **moteur** (`/internal/health` + token interne, P2) — Caddy ne publie 80/443 qu'une fois la chaîne complète saine (`depends_on: service_healthy`).
 - **Sauvegarde/restauration** : sauvegardes froides planifiées (checkpoint WAL + `integrity_check` + rotation) hors du volume Docker, script de restauration gardé-fou (rollback automatique en cas d'échec d'intégrité).
 - **Journal d'audit** immuable : connexion/déconnexion, création/lancement de campagnes, annulations, changements de statut des constats, générations de rapports.
 - **Robustesse** : wrapper d'erreurs uniforme (aucune fuite de stack), récupération au boot (scans orphelins → `FAILED`), arrêt gracieux (SIGTERM → scans finalisés `CANCELLED`), verrous applicatifs par campagne (anti course-critique), sanitization des cibles avant interpolation dans les logs.

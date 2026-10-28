@@ -82,6 +82,8 @@ services:
       BIND_HOST: 0.0.0.0
       # ── Limites de ressources ──
       MAX_CONCURRENT_SCANS: ${MAX_CONCURRENT_SCANS:-3}
+      # Rétention des journaux de scan (P3) — 0 désactive
+      LOG_RETENTION_DAYS: ${LOG_RETENTION_DAYS:-30}
       # CORS socket.io : URL publique du site (si définie dans le .env)
       SITE_ORIGIN: ${SITE_ORIGIN:-}
       # ── Exécution réelle des outils ──

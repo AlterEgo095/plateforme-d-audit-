@@ -231,6 +231,7 @@ docker compose up -d --build
 | `DEMO_SEED` (app) | `1` = créer les comptes de démo (identifiants publics) | `0` en production |
 | `ADMIN_USERNAME` / `ADMIN_PASSWORD` (app) | Premier compte ADMIN créé au premier démarrage (amorçage) | — |
 | `MAX_CONCURRENT_SCANS` (engine) | Plafond global de scans simultanés (protection VPS) | `3` |
+| `LOG_RETENTION_DAYS` (engine) | Rétention des journaux de scan en jours (P3 — purges au boot puis chaque 24 h ; 0 désactive ; constats et AuditTrail intacts) | `30` |
 | `SITE_ORIGIN` (engine) | Origine autorisée pour les handshakes socket.io (CORS) | réflexif |
 | `PHANTOM_IMAGE` (engine) | Image sandbox Kali de Phantom (vide = défaut amont) | — |
 | `PHANTOM_COMPRESSOR_LLM` (engine) | Modèle LiteLLM du compresseur mémoire de Phantom | `PHANTOM_LLM` amont |
@@ -248,6 +249,22 @@ docker compose up -d --build
 - **Sauvegarde manuelle (cron hôte)** : le script fonctionne aussi directement sur l'hôte (chemins par défaut) — `30 3 * * * /opt/auditforge/scripts/auditforge-backup.sh >> /opt/auditforge/backups/backup.log 2>&1`.
 - **Restauration** : `sudo scripts/auditforge-restore.sh /opt/auditforge/backups/auditforge-<TS>.db --auto` — vérifie l'intégrité **avant** toute modification, arrête `app`/`engine`/`backup`, conserve l'état courant (`*.pre-restore-<TS>`, jamais détruit), installe la sauvegarde, re-vérifie l'intégrité, relance la pile. `--dry-run` affiche le plan sans rien toucher.
 - **Testez la restauration** après le premier déploiement (sur une copie, avec `--dry-run` puis un vrai run) — une sauvegarde non testée n'est pas une sauvegarde.
+
+### Surveillance des sauvegardes (P3)
+
+Chaque tentative de sauvegarde (succès **ou** échec) écrit `last-backup.json` dans le répertoire des sauvegardes : horodatage, statut (`ok`/`error`), durée, fichier produit et message d'erreur éventuel.
+
+- **Healthcheck du sidecar `backup`** (P3) : le conteneur passe `unhealthy` — visible dans `docker ps` — si le dernier essai est en erreur, date de plus de 2 périodes (`2 × BACKUP_INTERVAL_SECONDS`) ou n'a jamais eu lieu. Un `unhealthy` veut dire : **plus de sauvegarde fiable, agissez** (`docker logs auditforge-backup-1`, disque plein ? base déplacée ?).
+- **Contrôle manuel** : `cat /opt/auditforge/backups/last-backup.json` puis `ls -lht /opt/auditforge/backups | head` — le fichier le plus récent doit dater de moins de 24 h (hors périodes personnalisées).
+- **Alerte externe (recommandé)** : un cron hôte qui vérifie la fraîcheur du JSON et notifie (mail/ntfy/…) en cas de `status: error` ou d'âge > `2 × BACKUP_INTERVAL_SECONDS` — l'auto-hébergement n'a pas d'équipe d'astreinte, c'est ce filet qui la remplace.
+
+### Maintenance et exploitation au quotidien (P3)
+
+- **Santé de la pile** : `docker ps --format 'table {{.Names}}\t{{.Status}}'` — tous les services doivent être `Up (healthy)` (`app`, `engine`, `docker-proxy`, `caddy`, `backup`). Un `unhealthy` quelconque se diagnostique par `docker logs <conteneur> --tail 50`.
+- **Rétention des journaux de scan** : les lignes de terminal (`ScanLog`) sont purgées au-delà de `LOG_RETENTION_DAYS` (30 j par défaut, balayage au démarrage du moteur puis chaque 24 h ; `0` désactive). Les **constats** et le **journal d'audit** ne sont jamais supprimés — la base cesse de croître sans borne tout en conservant l'intégralité de la matière métier.
+- **Rotation des logs conteneurs** : `json-file` 10 Mo × 3 (P2) — rien à faire.
+- **Hygiène des dépendances** : `bun audit` avant chaque mise à jour ; les dépendances « tool-time » restantes (chaînes eslint / prisma CLI, sans chemin d'exécution applicatif) sont documentées au worklog. Les mises à jour dans les plages semver : `bun update` (jamais `--latest` sans revue — les majeures, ex. recharts 3, sont volontairement non suivies).
+- **Après chaque `docker compose up -d --build`** : vérifier `docker ps` (healthy partout), se connecter à l'interface, lancer une campagne de test PHANTOM/QUICK sur une cible de laboratoire, contrôler le terminal live et la présence de la sauvegarde du jour.
 
 ---
 
@@ -267,8 +284,10 @@ docker compose up -d --build
 - **Confinement des conteneurs (P2)** : `no-new-privileges:true` sur **tous** les services, `cap_drop: ALL` (caddy ne conserve que `NET_BIND_SERVICE` pour écouter 80/443), plafonds `mem_limit`/`cpus`/`pids_limit` paramétrables (un dérèglement ne peut plus affamer le VPS), rotation des logs conteneurs (`json-file` 10 Mo × 3 — `/var/lib/docker` cesse de croître sans borne).
 - **Healthchecks de bout en bout** : app (`/api/auth/me`), proxy Docker (`/_ping`, P1) et **moteur** (`/internal/health` + token interne, P2) — Caddy ne publie 80/443 qu'une fois la chaîne complète saine (`depends_on: service_healthy`).
 - **Sauvegarde/restauration** : sauvegardes froides planifiées (checkpoint WAL + `integrity_check` + rotation) hors du volume Docker, script de restauration gardé-fou (rollback automatique en cas d'échec d'intégrité).
+- **Observabilité des sauvegardes (P3)** : `last-backup.json` tracé sur chaque tentative + healthcheck du sidecar (`unhealthy` si échec ou sauvegarde périmée) — une sauvegarde silencieusement morte est détectable dans `docker ps`.
 - **Journal d'audit** immuable : connexion/déconnexion, création/lancement de campagnes, annulations, changements de statut des constats, générations de rapports.
 - **Robustesse** : wrapper d'erreurs uniforme (aucune fuite de stack), récupération au boot (scans orphelins → `FAILED`), arrêt gracieux (SIGTERM → scans finalisés `CANCELLED`), verrous applicatifs par campagne (anti course-critique), sanitization des cibles avant interpolation dans les logs.
+- **Hygiène logicielle (P3)** : `bun audit` sans critique dans les dépendances d'exécution, `overrides` npm pour écraser les transitives vulnérables (lodash), mises à jour semver-revues (next 16.4, react 19.3, prisma 6.19.3, zod 4.6) ; rétention `ScanLog` (`LOG_RETENTION_DAYS`) — la base ne croît plus sans borne.
 
 ---
 

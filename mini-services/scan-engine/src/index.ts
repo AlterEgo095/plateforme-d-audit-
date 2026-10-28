@@ -17,6 +17,7 @@ import { timingSafeEqual } from "node:crypto";
 import { Server } from "socket.io";
 import { db } from "./db";
 import { reconcileStaleCampaigns } from "./campaign-finalize";
+import { startLogRetentionScheduler } from "./maintenance";
 import { ScanEngine, setIo } from "./engine";
 import { verifySessionToken } from "./session";
 import { currentExecMode, getRealAdapter } from "./real-exec/index";
@@ -438,6 +439,12 @@ async function main(): Promise<void> {
   // celles dont tous les scans sont terminaux mais qui n'ont jamais été
   // finalisées (bug antérieur ou interruption ci-dessus).
   void reconcileStaleCampaigns();
+
+  // P3 (audit v2) : rétention des journaux de scan (ScanLog) — balayage au
+  // boot (non bloquant) puis quotidien ; ScanLog au-delà de
+  // LOG_RETENTION_DAYS (défaut 30 j, 0 = désactivé) purgé, constats et
+  // AuditTrail intacts. Voir src/maintenance.ts.
+  startLogRetentionScheduler();
 
   const engine = new ScanEngine();
 

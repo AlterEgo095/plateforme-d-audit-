@@ -12,7 +12,9 @@
 
 FROM alpine:3.20
 
-RUN apk add --no-cache sqlite
+# bash : le script P0-1 porte le shebang #!/bin/bash (identique au cron hôte) —
+# busybox ash ne l'interprète pas (« not found » au lancement du sidecar).
+RUN apk add --no-cache sqlite bash
 
 COPY scripts/auditforge-backup.sh /usr/local/bin/auditforge-backup.sh
 RUN chmod +x /usr/local/bin/auditforge-backup.sh

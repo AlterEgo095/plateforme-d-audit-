@@ -658,6 +658,46 @@ const niktoSpec: ArsenalSpec = {
   },
 };
 
+/** Risques ZAP (riskcode) → sévérité plateforme (report JSON ET vue /alerts). */
+const ZAP_RISK: Record<string, RealFinding["severity"]> = {
+  "0": "INFO", "1": "LOW", "2": "MEDIUM", "3": "HIGH",
+};
+
+/**
+ * Alerte ZAP (report JSON « -J » OU vue /JSON/core/view/alerts) → constat.
+ * Même structure d'objet dans les deux modes — mapping unique partagé.
+ */
+function zapAlertFinding(a: Record<string, unknown>): RealFinding | null {
+  const name = String(a.name ?? "").trim();
+  if (!name) return null;
+  const instances = Array.isArray(a.instances) ? (a.instances as Record<string, unknown>[]) : [];
+  const first = instances[0] ?? {};
+  const uri = String(first.uri ?? "").trim();
+  const param = String(first.param ?? "").trim();
+  const evidence = String(first.evidence ?? "").trim();
+  const riskcode = String(a.riskcode ?? "0");
+  const zapConf = String(a.confidence ?? "0");
+  return {
+    title: name,
+    severity: ZAP_RISK[riskcode] ?? "LOW",
+    confidence: zapConf === "2" || zapConf === "3" ? "PROBABLE" : "UNVERIFIED",
+    category: "web",
+    cve: null,
+    cvss: null,
+    location: param ? `${uri} — paramètre ${param}` : uri || undefined,
+    description: String(a.description ?? "").trim(),
+    evidence: evidenceBlock([
+      instances.length ? `${instances.length} occurrence(s)` : undefined,
+      evidence ? `évidence : ${evidence}` : undefined,
+      typeof a.otherinfo === "string" && a.otherinfo.trim() ? a.otherinfo.trim() : undefined,
+      typeof a.cweid === "string" && a.cweid ? `CWE-${a.cweid}` : undefined,
+      typeof a.reference === "string" && a.reference.trim() ? a.reference.trim().slice(0, 800) : undefined,
+    ]),
+    sentinelTriggered: false,
+    remediation: String(a.solution ?? "").trim() || undefined,
+  };
+}
+
 const zapSpec: ArsenalSpec = {
   tool: "ZAP",
   bin: () => REAL_EXEC.zapCommand,
@@ -685,48 +725,209 @@ const zapSpec: ArsenalSpec = {
     const raw = await readReport(reportPath);
     const rows = parseJsonOrJsonl(raw);
     const out: RealFinding[] = [];
-    const RISK: Record<string, RealFinding["severity"]> = {
-      "0": "INFO", "1": "LOW", "2": "MEDIUM", "3": "HIGH",
-    };
     for (const site of rows) {
       const sites = Array.isArray(site.site) ? (site.site as Record<string, unknown>[]) : [];
       for (const s of sites) {
         const alerts = Array.isArray(s.alerts) ? (s.alerts as Record<string, unknown>[]) : [];
         for (const a of alerts) {
-          const name = String(a.name ?? "").trim();
-          if (!name) continue;
-          const instances = Array.isArray(a.instances) ? (a.instances as Record<string, unknown>[]) : [];
-          const first = instances[0] ?? {};
-          const uri = String(first.uri ?? "").trim();
-          const param = String(first.param ?? "").trim();
-          const evidence = String(first.evidence ?? "").trim();
-          const riskcode = String(a.riskcode ?? "0");
-          const zapConf = String(a.confidence ?? "0");
-          out.push({
-            title: name,
-            severity: RISK[riskcode] ?? "LOW",
-            confidence: zapConf === "2" || zapConf === "3" ? "PROBABLE" : "UNVERIFIED",
-            category: "web",
-            cve: null,
-            cvss: null,
-            location: param ? `${uri} — paramètre ${param}` : uri || undefined,
-            description: String(a.description ?? "").trim(),
-            evidence: evidenceBlock([
-              instances.length ? `${instances.length} occurrence(s)` : undefined,
-              evidence ? `évidence : ${evidence}` : undefined,
-              typeof a.otherinfo === "string" && a.otherinfo.trim() ? a.otherinfo.trim() : undefined,
-              typeof a.cweid === "string" && a.cweid ? `CWE-${a.cweid}` : undefined,
-              typeof a.reference === "string" && a.reference.trim() ? a.reference.trim().slice(0, 800) : undefined,
-            ]),
-            sentinelTriggered: false,
-            remediation: String(a.solution ?? "").trim() || undefined,
-          });
+          const f = zapAlertFinding(a);
+          if (f) out.push(f);
         }
       }
     }
     return out;
   },
 };
+
+// ─── ZAP — pilote API REST (side-car compose, RF2) ──────────────────
+
+/**
+ * Audit v2 (RF2) : ZAP est une application Java lourde — plutôt que de
+ * l'installer dans l'image moteur, le déploiement compose le fournit en
+ * side-car (ghcr.io/zaproxy/zaproxy, réseau interne). Quand ZAP_API_URL est
+ * définie, cet adaptateur pilote le daemon via son API REST officielle :
+ * spider → scan passif → scan actif → collecte des alertes. Aucun binaire
+ * local n'est requis et la disponibilité (realAvailable) est TRUE dès que
+ * l'API répond — exécution réelle authentique, pas une simulation.
+ *
+ * Sans ZAP_API_URL, on retombe sur le mode binaire (zapSpec ci-dessus).
+ */
+class ZapApiAdapter implements RealToolAdapter {
+  readonly tool = "ZAP" as const;
+  private readonly base = REAL_EXEC.zapApiUrl;
+  private readonly key = REAL_EXEC.zapApiKey;
+
+  private async api<T = Record<string, unknown>>(
+    path: string,
+    params: Record<string, string> = {},
+    timeoutMs = 30_000,
+  ): Promise<T> {
+    const url = new URL(this.base + path);
+    for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
+    const res = await fetch(url, {
+      headers: this.key ? { "X-Zap-Api-Key": this.key } : undefined,
+      signal: AbortSignal.timeout(timeoutMs),
+      cache: "no-store",
+    });
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      throw new Error(`ZAP API ${path} → HTTP ${res.status}${body ? ` : ${body.slice(0, 200)}` : ""}`);
+    }
+    return (await res.json()) as T;
+  }
+
+  async checkAvailable(): Promise<RealAvailability> {
+    if (!this.base) {
+      return { available: false, reason: "ZAP_API_URL non définie — repli sur le mode binaire impossible ici" };
+    }
+    try {
+      const v = await this.api<{ version?: string }>("/JSON/core/view/version/", {}, 10_000);
+      return { available: true, version: v.version || "daemon" };
+    } catch (err) {
+      return {
+        available: false,
+        reason: `API ZAP (${this.base}) injoignable : ${err instanceof Error ? err.message : String(err)}`,
+      };
+    }
+  }
+
+  /** Boucle d'attente partagée : poll une vue jusqu'à la condition, abort-aware. */
+  private async pollUntil(
+    ctx: RealAdapterContext,
+    label: string,
+    view: string,
+    params: Record<string, string>,
+    readPct: (v: Record<string, unknown>) => number,
+    opts: { intervalMs?: number; maxMinutes?: number } = {},
+  ): Promise<void> {
+    const interval = opts.intervalMs ?? 5_000;
+    const deadline = Date.now() + (opts.maxMinutes ?? REAL_EXEC.timeoutMinutes) * 60_000;
+    let lastPct = -1;
+    for (;;) {
+      if (ctx.signal.aborted) throw new Error("Scan annulé pendant l'exécution de l'outil");
+      if (Date.now() > deadline) throw new Error(`Scan ZAP : timeout global atteint (${label})`);
+      let pct = -1;
+      try {
+        pct = readPct(await this.api<Record<string, unknown>>(view, params));
+      } catch (err) {
+        await ctx.onLog(`${label} : interrogation impossible (${String(err)}) — nouvelle tentative`, "WARN", "zap");
+      }
+      if (pct >= 100) return;
+      if (pct >= 0 && pct !== lastPct) {
+        lastPct = pct;
+        await ctx.onLog(`${label} : ${pct}%`, "TOOL", "zap");
+        await ctx.onPhase(label, Math.max(5, Math.min(95, pct)));
+      }
+      await new Promise((r) => setTimeout(r, interval));
+    }
+  }
+
+  async run(ctx: RealAdapterContext): Promise<RealFinding[]> {
+    if (ctx.targetType !== "URL") {
+      throw new Error("ZAP (API) audite une URL déployée — cible non supportée");
+    }
+    const target = baseOfUrl(ctx.target);
+    await ctx.onPhase("INIT", 4);
+    const version = await this.api<{ version?: string }>("/JSON/core/view/version/");
+    await ctx.onLog(
+      `ZAP daemon ${version.version ?? "?"} (API ${this.base}) — cible ${target}`,
+      "CMD",
+      "zap",
+    );
+
+    // Amorce l'arbre de sites (la cible doit être joignable depuis le daemon).
+    try {
+      await this.api("/JSON/core/action/accessUrl/", { url: target, followRedirects: "true" }, 60_000);
+    } catch (err) {
+      await ctx.onLog(`accessUrl : ${String(err)} — le spider tentera quand même`, "WARN", "zap");
+    }
+
+    // 1) Spider classique (découverte des URL) — 10 % → 45 %.
+    await ctx.onPhase("SPIDER", 10);
+    try {
+      await this.api("/JSON/spider/action/scan/", { url: target });
+      await this.pollUntil(ctx, "SPIDER", "/JSON/spider/view/status/", {}, (v) => Number(v.status ?? 0));
+    } catch (err) {
+      if (ctx.signal.aborted) throw err;
+      await ctx.onLog(`spider : ${String(err)} — poursuite sans spider`, "WARN", "zap");
+    }
+
+    // 2) Scan passif — attente de la vidange (recordsToScan = 0) — 50 %.
+    await ctx.onPhase("SCAN PASSIF", 48);
+    try {
+      await this.pollUntil(
+        ctx,
+        "SCAN PASSIF",
+        "/JSON/pscan/view/recordsToScan/",
+        {},
+        (v) => (Number(v.recordsToScan ?? 0) === 0 ? 100 : 50),
+        { intervalMs: 3_000 },
+      );
+    } catch (err) {
+      if (ctx.signal.aborted) throw err;
+      await ctx.onLog(`scan passif : ${String(err)} — poursuite`, "WARN", "zap");
+    }
+
+    // 3) Scan actif (politique par défaut) — 55 % → 90 %.
+    await ctx.onPhase("SCAN ACTIF", 55);
+    try {
+      const started = await this.api<{ scan?: string }>("/JSON/ascan/action/scan/", {
+        url: target,
+        inScopeOnly: "false",
+        recurse: "true",
+      });
+      if (!started.scan || started.scan === "-1" || started.scan === "") {
+        throw new Error(`ascan non démarré (${JSON.stringify(started).slice(0, 200)})`);
+      }
+      await this.pollUntil(ctx, "SCAN ACTIF", "/JSON/ascan/view/status/", {}, (v) => Number(v.status ?? 0));
+    } catch (err) {
+      if (ctx.signal.aborted) throw err;
+      await ctx.onLog(`scan actif : ${String(err)} — les alertes passives restent collectées`, "WARN", "zap");
+    }
+
+    if (ctx.signal.aborted) throw new Error("Scan annulé pendant l'exécution de l'outil");
+
+    // 4) Collecte paginée des alertes (count max ZAP = 5000) — 95 %.
+    await ctx.onPhase("RAPPORT", 92);
+    const all: Record<string, unknown>[] = [];
+    let start = 0;
+    for (;;) {
+      const page = await this.api<{ alerts?: Record<string, unknown>[] }>("/JSON/core/view/alerts/", {
+        baseurl: target,
+        start: String(start),
+        count: "5000",
+      });
+      const alerts = Array.isArray(page.alerts) ? page.alerts : [];
+      all.push(...alerts);
+      if (alerts.length < 5000 || all.length >= 5000) break;
+      start += alerts.length;
+    }
+    await ctx.onLog(`ZAP : ${all.length} alerte(s) collectée(s)`, "TOOL", "zap");
+    const findings: RealFinding[] = [];
+    for (const a of all) {
+      const f = zapAlertFinding(a);
+      if (f) findings.push(f);
+    }
+    await ctx.onPhase("RAPPORT", 96);
+    return capFindings(findings, 300, "ZAP : sortie tronquée");
+  }
+
+  /** Annulation proactive : stoppe spider + ascan sur le daemon. */
+  async cancel(): Promise<void> {
+    try {
+      await this.api("/JSON/ascan/action/stop/");
+      await this.api("/JSON/spider/action/stop/");
+    } catch {
+      /* le daemon est peut-être déjà arrêté — rien de plus à faire */
+    }
+  }
+}
+
+/** P5+RF2 : adaptateur ZAP — API REST (side-car) si ZAP_API_URL, sinon binaire. */
+export function makeZapAdapter(): RealToolAdapter {
+  if (REAL_EXEC.zapApiUrl) return new ZapApiAdapter();
+  return makeArsenalAdapter(zapSpec);
+}
 
 // ─── Analyse de code : Semgrep / Trivy / Gitleaks ────────────────────
 
@@ -1018,9 +1219,14 @@ const sqlmapSpec: ArsenalSpec = {
     // sqlmap -v 0 : les points d'injection confirmés apparaissent sous la forme
     //   Parameter: email (POST)
     //       Type: boolean-based blind | Title: … | Payload: …
+    // Audit v2 (RF2bis) : la regex d'origine était paresseuse SANS ancre — le
+    // groupe optionnel « (\((\w+)\))? » n'étant jamais rétrogradé, la capture
+    // s'arrêtait au 1er caractère (« email » → « e »). L'ancre lookahead
+    // « (?=\n|$) » force le moteur à développer la capture jusqu'à la fin de
+    // ligne : le nom complet du paramètre est extrait (User-Agent, #1*, id…).
     const text = stdout.join("\n");
     const out: RealFinding[] = [];
-    const paramRe = /Parameter:\s*([^\n(]+?)(?:\s*\((\w+)\))?/g;
+    const paramRe = /Parameter:\s*([^\n]+?)\s*(?:\((\w+)\))?\s*(?=\n|$)/g;
     let match: RegExpExecArray | null;
     while ((match = paramRe.exec(text)) !== null) {
       const param = match[1].trim();
@@ -1092,14 +1298,17 @@ const ffufSpec: ArsenalSpec = {
       ? REAL_EXEC.ffufWordlist
       : "/usr/share/wordlists/dirb/common.txt";
     const reportPath = join(ctx.workdir, "ffuf.json");
+    // Audit v2 (RF4) : -t 30 saturait la cible (30 threads = fuzzing agressif,
+    // DoS potentiel sur un petit VPS cible). -t 4 + -rate 100 : fuzzing contenu,
+    // sans dégradation du service audité. -ac (autofilter) est conservé.
     return {
       args: [
         "-u", `${base}/FUZZ`, "-w", wl,
         "-of", "json", "-o", reportPath,
-        "-ac", "-t", "30", "-timeout", "8", "-s",
+        "-ac", "-t", "4", "-rate", "100", "-timeout", "8", "-s",
       ],
       reportPath,
-      cmdLabel: `ffuf -u ${base}/FUZZ -w ${wl} -of json -o ffuf.json -ac -t 30`,
+      cmdLabel: `ffuf -u ${base}/FUZZ -w ${wl} -of json -o ffuf.json -ac -t 4 -rate 100`,
     };
   },
   async parse({ reportPath }) {

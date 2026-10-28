@@ -20,7 +20,7 @@
  * (tools-status + bascule simulation en mode auto).
  */
 
-import { ARSENAL_SPECS, makeArsenalAdapter } from "./arsenal";
+import { ARSENAL_SPECS, makeArsenalAdapter, makeZapAdapter } from "./arsenal";
 import { BasaltAdapter } from "./basalt";
 import { DeepAuditAdapter } from "./deepaudit";
 import { execMode, type ExecMode } from "./env";
@@ -40,7 +40,9 @@ const ADAPTERS: Partial<Record<Tool, () => RealToolAdapter>> = {
   HTTPX: () => makeArsenalAdapter(ARSENAL_SPECS.HTTPX),
   NUCLEI: () => makeArsenalAdapter(ARSENAL_SPECS.NUCLEI),
   NIKTO: () => makeArsenalAdapter(ARSENAL_SPECS.NIKTO),
-  ZAP: () => makeArsenalAdapter(ARSENAL_SPECS.ZAP),
+  // RF2 (audit v2) : ZAP bascule automatiquement API REST (side-car compose,
+  // ZAP_API_URL définie) ou binaire local (zap-baseline.py).
+  ZAP: () => makeZapAdapter(),
   SEMGREP: () => makeArsenalAdapter(ARSENAL_SPECS.SEMGREP),
   TRIVY: () => makeArsenalAdapter(ARSENAL_SPECS.TRIVY),
   GITLEAKS: () => makeArsenalAdapter(ARSENAL_SPECS.GITLEAKS),

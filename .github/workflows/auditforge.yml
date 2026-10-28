@@ -1,0 +1,105 @@
+# ── AuditForge — garde-fous continus (audit v2 — remédiation) ────────────────
+# RF1 s'est produit faute de rejeu E2E avant commit. Ce pipeline bloque la
+# récidive : dérive de schéma Prisma (job validate), typecheck/lint, image
+# moteur avec arsenal réel (job docker-engine), et smoke test E2E complet
+# app ⇄ moteur (job smoke-test — aurait bloqué RF1 à son introduction).
+name: auditforge
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      # RF1 — la dérive du schéma moteur (copie périmée) cassait /internal/run
+      # (500 au lancement de tout scan). Le diff doit rester VIDE.
+      - name: Garde-fou RF1 — schémas Prisma synchronisés
+        run: |
+          diff prisma/schema.prisma mini-services/scan-engine/prisma/schema.prisma
+          echo "✅ schémas Prisma racine ⇄ moteur identiques"
+
+      - name: Installation (racine + moteur)
+        run: |
+          bun install --frozen-lockfile
+          (cd mini-services/scan-engine && bun install --frozen-lockfile)
+
+      - name: Typecheck (racine + moteur)
+        run: |
+          bunx tsc --noEmit
+          (cd mini-services/scan-engine && bunx tsc --noEmit)
+
+      - name: Lint
+        run: bun run lint
+
+  docker-engine:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image moteur (arsenal réel, WITH_ARSENAL=1)
+        run: docker build --build-arg WITH_ARSENAL=1 -f scripts/Dockerfile.engine -t engine:test .
+
+      - name: Vérification des 10 binaires réels
+        run: |
+          docker run --rm engine:test sh -c '
+            set -e
+            for bin in subfinder httpx nuclei amass ffuf nikto sqlmap semgrep trivy gitleaks; do
+              command -v "$bin" >/dev/null 2>&1 || { echo "❌ $bin MANQUANT"; exit 1; }
+              echo "✅ $bin présent"
+            done
+            echo "── versions ──"
+            nuclei -version
+            semgrep --version
+            trivy --version
+            gitleaks version
+          '
+
+  smoke-test:
+    runs-on: ubuntu-latest
+    needs: [validate]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Installation (racine + moteur)
+        run: |
+          bun install --frozen-lockfile
+          (cd mini-services/scan-engine && bun install --frozen-lockfile)
+          bunx prisma generate
+
+      - name: Schéma + démarrage app + smoke test E2E
+        env:
+          # Chemin ABSOLU : l'app ET le moteur doivent voir LA MÊME base
+          # (un chemin relatif serait résolu différemment par les deux
+          # schémas Prisma → deux bases distinctes → scans introuvables).
+          DATABASE_URL: file:${{ github.workspace }}/db/ci.db
+        run: |
+          mkdir -p "${GITHUB_WORKSPACE}/db"
+          bunx prisma db push --skip-generate
+          bun run dev > dev-ci.log 2>&1 &
+          echo "▶ attente de l'application…"
+          ok=0
+          for i in $(seq 1 60); do
+            if curl -sf -o /dev/null --max-time 3 http://127.0.0.1:3000/; then ok=1; break; fi
+            sleep 2
+          done
+          if [ "$ok" != "1" ]; then echo "❌ app non démarrée"; tail -60 dev-ci.log; exit 1; fi
+          ./scripts/smoke-test.sh
+
+      - name: Journaux en cas d'échec
+        if: failure()
+        run: |
+          echo "── dev-ci.log ──"; tail -80 dev-ci.log || true
+          echo "── dev-engine.log ──"; tail -80 dev-engine.log || true

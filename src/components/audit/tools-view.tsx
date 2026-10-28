@@ -34,6 +34,46 @@ const TARGET_META: Record<TargetType, { icon: typeof Globe; label: string }> = {
   NETWORK: { icon: Network, label: "Réseau" },
 };
 
+// E4 (audit v2) : catalogue regroupé par famille — l'opérateur voit la
+// logique métier (agents IA vs arsenal evergreen : recon → DAST → code →
+// exploitation) au lieu d'une liste plate de 15 fiches.
+const FAMILY_META: Array<{
+  id: NonNullable<ToolInfo["family"]>;
+  label: string;
+  description: string;
+}> = [
+  {
+    id: "AGENT",
+    label: "Agents d'audit IA",
+    description:
+      "Agents autonomes (sandbox Docker éphémère) : pentest piloté par LLM et vérification de PoC.",
+  },
+  {
+    id: "RECON",
+    label: "Reconnaissance",
+    description:
+      "Cartographie de la surface d'attaque : énumération DNS passive et sondes HTTP.",
+  },
+  {
+    id: "DAST",
+    label: "Scan dynamique (DAST)",
+    description:
+      "Audit d'une application déployée : signatures de vulnérabilités et misconfigurations.",
+  },
+  {
+    id: "CODE",
+    label: "Analyse de code & dépendances",
+    description:
+      "SAST, analyse SCA des dépendances et détection de secrets dans les dépôts.",
+  },
+  {
+    id: "EXPLOIT",
+    label: "Exploitation ciblée",
+    description:
+      "Confirmation active : injection SQL et fuzzing de répertoires (usage encadré).",
+  },
+];
+
 // ─── Boîte du schéma d'architecture ──────────────────────────────────
 
 function ArchBox({
@@ -251,13 +291,42 @@ export function ToolsView() {
             </CardContent>
           </Card>
         ) : (
-          <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-            {tools.map((tool) => (
-              <ToolCard key={tool.id} tool={tool} />
-            ))}
-          </div>
+          <FamilyToolSections tools={tools} />
         )}
       </section>
+    </div>
+  );
+}
+
+/** E4 : sections par famille (ordre métier), outils sans famille en repli. */
+function FamilyToolSections({ tools }: { tools: ToolInfo[] }) {
+  const noFamily = tools.filter((t) => !t.family || !FAMILY_META.some((f) => f.id === t.family));
+  return (
+    <div className="space-y-8">
+      {FAMILY_META.map((family) => {
+        const members = tools.filter((t) => t.family === family.id);
+        if (members.length === 0) return null;
+        return (
+          <div key={family.id} className="space-y-3">
+            <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+              <h3 className="text-base font-semibold tracking-tight">{family.label}</h3>
+              <span className="text-muted-foreground text-xs">{family.description}</span>
+            </div>
+            <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+              {members.map((tool) => (
+                <ToolCard key={tool.id} tool={tool} />
+              ))}
+            </div>
+          </div>
+        );
+      })}
+      {noFamily.length > 0 && (
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+          {noFamily.map((tool) => (
+            <ToolCard key={tool.id} tool={tool} />
+          ))}
+        </div>
+      )}
     </div>
   );
 }

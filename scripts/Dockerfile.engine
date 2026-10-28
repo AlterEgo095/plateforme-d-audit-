@@ -3,6 +3,23 @@
 # (Phantom, Basalt installés via pip — leurs sandbox utilisent le socket Docker
 # de l'hôte : monter /var/run/docker.sock au déploiement, voir docker-compose).
 
+# ── 0) RF2 (audit v2) : étage de build des outils Go (multi-stage) ─────────
+# Les 5 binaires projectdiscovery/OWASP/ffuf sont compilés dans un étage
+# DÉDIÉ (golang:1.23-alpine) : le runner final ne contient NI toolchain Go NI
+# cache de modules — image plus légère, couches reconstructibles, build Go
+# mis en cache indépendamment du code moteur. WITH_ARSENAL=0 (défaut) saute
+# la compilation : /arsenal-bin reste vide, aucune binaire copié.
+FROM golang:1.23-alpine AS go-builder
+ARG WITH_ARSENAL=0
+RUN mkdir -p /arsenal-bin
+RUN if [ "$WITH_ARSENAL" = "1" ]; then set -eux; \
+      GOBIN=/arsenal-bin go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest \
+      && GOBIN=/arsenal-bin go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest \
+      && GOBIN=/arsenal-bin go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest \
+      && GOBIN=/arsenal-bin go install -v github.com/owasp-amass/amass/v4/cmd/amass@latest \
+      && GOBIN=/arsenal-bin go install -v github.com/ffuf/ffuf/v2@latest; \
+    fi
+
 # ── 1) Dépendances Bun + génération du client Prisma ────────────────────────
 FROM oven/bun:1 AS build
 WORKDIR /engine
@@ -88,25 +105,29 @@ RUN sed -i 's/priority_tools=\["nmap", "httpx", "nuclei", "sqlmap", "ffuf", "nik
 # docker build --build-arg WITH_ARSENAL=1 -t auditforge/engine …
 # Installe les 11 piliers open source (recon / DAST / SAST-SCA / exploitation)
 # dans l'image du moteur. Sans ce build-arg, les outils restent en simulation
-# (disponibilité honnête — sonde par binaire). Go téléchargé en version
-# éphémère (multi-étapes implicites : couche unique, cache nettoyé).
+# (disponibilité honnête — sonde par binaire).
+# RF2 : les binaires Go viennent de l'étage go-builder (multi-stage) ; le
+# runner n'ajoute que les outils non-Go (apt : nikto/sqlmap ; pip : semgrep ;
+# releases : trivy/gitleaks) puis copie les binaires Go si WITH_ARSENAL=1.
 ARG WITH_ARSENAL=0
 RUN if [ "$WITH_ARSENAL" = "1" ]; then set -eux; \
       apt-get update -y \
-      && apt-get install -y --no-install-recommends golang-go wget unzip \
-      && GOBIN=/usr/local/bin go install github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest \
-      && GOBIN=/usr/local/bin go install github.com/projectdiscovery/httpx/cmd/httpx@latest \
-      && GOBIN=/usr/local/bin go install github.com/projectdiscovery/nuclei/v2/cmd/nuclei@latest \
-      && GOBIN=/usr/local/bin go install github.com/owasp-amass/amass/v4/cmd/amass@latest \
-      && GOBIN=/usr/local/bin go install github.com/ffuf/ffuf/v2@latest \
-      && apt-get install -y --no-install-recommends nikto sqlmap \
+      && apt-get install -y --no-install-recommends nikto sqlmap wget unzip \
       && pip install --no-cache-dir semgrep \
       && wget -qO /tmp/trivy.tgz https://github.com/aquasecurity/trivy/releases/latest/download/trivy_Linux-64bit.tar.gz \
       && tar -xzf /tmp/trivy.tgz -C /usr/local/bin trivy && rm /tmp/trivy.tgz \
-      && wget -qO /usr/local/bin/gitleaks https://github.com/gitleaks/gitleaks/releases/latest/download/gitleaks-linux-amd64 \
-      && chmod 0755 /usr/local/bin/gitleaks \
-      && apt-get purge -y --auto-remove golang-go wget unzip \
-      && rm -rf /var/lib/apt/lists/* /root/.cache /root/go; \
+      && GL_VER="$(wget -qO- https://api.github.com/repos/gitleaks/gitleaks/releases/latest | sed -n 's/.*"tag_name": *"v\([^"]*\)".*/\1/p' | head -1)" \
+      && [ -n "$GL_VER" ] || { echo "gitleaks : version amont illisible" >&2; exit 1; } \
+      && wget -qO /tmp/gitleaks.tgz "https://github.com/gitleaks/gitleaks/releases/download/v${GL_VER}/gitleaks_${GL_VER}_linux_x64.tar.gz" \
+      && tar -xzf /tmp/gitleaks.tgz -C /usr/local/bin gitleaks && rm /tmp/gitleaks.tgz \
+      && rm -rf /var/lib/apt/lists/* /root/.cache; \
+    fi
+COPY --from=go-builder /arsenal-bin/ /arsenal-bin/
+RUN if [ "$WITH_ARSENAL" = "1" ]; then set -eux; \
+      [ -n "$(ls -A /arsenal-bin 2>/dev/null)" ] || { echo "go-builder : aucun binaire — WITH_ARSENAL=1 exige un build de l'étage go-builder" >&2; exit 1; }; \
+      mv /arsenal-bin/* /usr/local/bin/ && rmdir /arsenal-bin \
+      && chmod 0755 /usr/local/bin/subfinder /usr/local/bin/httpx /usr/local/bin/nuclei /usr/local/bin/amass /usr/local/bin/ffuf \
+      && nuclei -update-templates || echo "(warning) nuclei -update-templates a échoué — les templates seront téléchargés au premier scan"; \
     fi
 
 # Wordlist ffuf (seclists) — incluse avec WITH_ARSENAL ; chemin surchargeable

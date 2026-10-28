@@ -68,6 +68,15 @@ function envLimit(name: string, def: number, min: number): number {
   return Number.isFinite(n) && n >= min ? Math.floor(n) : def;
 }
 
+/**
+ * RF3 (audit v2) — seuil du watchdog de dispatch : un scan resté en file
+ * (ou en tête de chaîne) côté moteur AU-DELÀ de ce délai ALORS que des
+ * ressources sont libres signale un dispatch bloqué (pump coincé, erreur DB
+ * répétée, set `advancing` jamais libéré). Le watchdog journalise l'état
+ * (queuedSince, lastKick) puis force un re-dispatch direct.
+ */
+const QUEUE_WATCHDOG_MS = 5 * 60_000;
+
 // ─── Utilitaires RNG déterministes ────────────────────────────────────
 
 /** FNV-1a 32 bits — graine déterministe dérivée du scanId. */
@@ -209,6 +218,8 @@ export class ScanEngine {
   /** P4 : file d'attente FIFO — les scans soumis au-delà du plafond y patientent. */
   private queue: Array<{ cfg: EngineRunParams; enqueuedAt: number }> = [];
   private pumping = false;
+  /** RF3 : horodatage du dernier kick (journalisation watchdog). */
+  private lastKickAt = 0;
 
   /**
    * P5 : chaînes séquentielles par campagne. `head` = prochain scan à démarrer
@@ -216,8 +227,12 @@ export class ScanEngine {
    * n'est pas dans la chaîne (il est dans running) — l'avancement est déclenché
    * par la fin de chaque scan (start().finally), le kick périodique, et submit.
    * Les entrées de chaîne gardent leur statut DB QUEUED (cohérence campaign-finalize).
+   * RF3 : `headSince` horodate la mise en tête — détecte une chaîne bloquée.
    */
-  private chains = new Map<string, { head: EngineRunParams | null; pending: EngineRunParams[] }>();
+  private chains = new Map<
+    string,
+    { head: EngineRunParams | null; headSince: number; pending: EngineRunParams[] }
+  >();
   /** Garde anti-entrée concurrente de advanceChain par campagne. */
   private advancing = new Set<string>();
 
@@ -268,7 +283,7 @@ export class ScanEngine {
       // Premier scan de la chaîne : démarre immédiatement si une ressource est
       // libre, sinon il devient la tête (lancée par advanceChain au prochain
       // déclencheur — kick 30 s, fin d'un autre scan, ou pump).
-      this.chains.set(cfg.campaignId, { head: cfg, pending: [] });
+      this.chains.set(cfg.campaignId, { head: cfg, headSince: Date.now(), pending: [] });
       if (this.running.size < this.maxConcurrent) {
         this.advanceChain(cfg.campaignId);
         return "RUNNING"; // avance optimiste : le scan existait (vérifié en 404 par la route)
@@ -300,8 +315,19 @@ export class ScanEngine {
     const chain = this.chains.get(campaignId);
     if (!chain || this.advancing.has(campaignId)) return;
     if (!chain.head) {
-      if (chain.pending.length === 0) this.chains.delete(campaignId);
-      return;
+      if (chain.pending.length === 0) {
+        this.chains.delete(campaignId);
+        return;
+      }
+      // P5-fix (dispatch ordonné) : chaîne sans tête mais avec pending — le
+      // /internal/run suivant est arrivé APRÈS le shift du démarrage précédent
+      // (fenêtre entre les 2 vérifications DB et la prise de tête). Sans
+      // promotion, ce retour anticipatif est atteint à CHAQUE déclencheur
+      // (fin de scan, kick 30 s) : la chaîne reste bloquée pour toujours et
+      // le watchdog ne surveille que les chaînes à tête non nulle.
+      chain.head = chain.pending.shift() ?? null;
+      chain.headSince = Date.now();
+      if (!chain.head) return; // inatteignable (pending non vide ci-dessus)
     }
     if (this.running.size >= this.maxConcurrent) return; // réessayé au prochain déclencheur
     this.advancing.add(campaignId);
@@ -338,6 +364,7 @@ export class ScanEngine {
           return; // DB occupée — réessai au prochain déclencheur
         }
         chain.head = chain.pending.shift() ?? null;
+        chain.headSince = Date.now(); // RF3 : la nouvelle tête reprend son propre chrono
         if (status === "QUEUED") {
           this.start(head);
         } else {
@@ -359,8 +386,15 @@ export class ScanEngine {
     }
   }
 
-  /** Démarre réellement un scan (ancien corps de run()). */
+  /** Démarre réellement un scan (ancien corps de run()).
+   * RF3 : garde anti double-démarrage — le watchdog forçant un re-dispatch,
+   * un pump/advanceChain "zombie" qui se réveillerait tardivement ne doit
+   * JAMAIS relancer un scan déjà dans `running`. */
   private start(cfg: EngineRunParams): void {
+    if (this.running.has(cfg.scanId)) {
+      console.warn(`[engine] start : ${cfg.scanId} déjà en exécution — double démarrage évité`);
+      return;
+    }
     let resolveDone: () => void = () => undefined;
     const done = new Promise<void>((resolve) => {
       resolveDone = resolve;
@@ -425,10 +459,70 @@ export class ScanEngine {
   }
 
   /** P4 : réveille le dispatch (timer de sécurité — file bloquée par une erreur DB).
-   * P5 : réveille également les chaînes séquentielles en attente de ressources. */
+   * P5 : réveille également les chaînes séquentielles en attente de ressources.
+   * RF3 : journalisation systématique de l'état de dispatch (file, plus ancien
+   * queuedSince, chaînes, occupation) — un blocage devient visible dans les
+   * journaux AVANT que le watchdog n'intervienne. */
   kick(): void {
+    this.lastKickAt = Date.now();
+    const oldest = this.queue[0]?.enqueuedAt;
+    if (this.queue.length > 0 || this.chains.size > 0) {
+      const parts = [`running ${this.running.size}/${this.maxConcurrent}`];
+      if (this.queue.length > 0) {
+        parts.push(
+          `file ${this.queue.length}/${this.maxQueued}`,
+          `queuedSince ${Math.round((this.lastKickAt - (oldest ?? this.lastKickAt)) / 1000)}s`,
+        );
+      }
+      if (this.chains.size > 0) parts.push(`chaînes ${this.chains.size}`);
+      parts.push(`lastKick ${new Date(this.lastKickAt).toISOString()}`);
+      console.log(`[engine] kick — ${parts.join(", ")}`);
+    }
     if (this.queue.length > 0) this.pump();
     this.advanceAllChains();
+  }
+
+  /**
+   * RF3 (audit v2) : watchdog de la file — détecte et débloque un dispatch
+   * coincé. Signature du blocage : un scan en file OU en tête de chaîne depuis
+   * plus de QUEUE_WATCHDOG_MS ALORS QUE des ressources sont libres (running <
+   * maxConcurrent). Actions : journal ERROR avec queuedSince/lastKick, remise
+   * à zéro des verrous internes (pumping/advancing) et re-dispatch forcé.
+   * La garde anti double-démarrage de start() garantit l'innocuité si un
+   * verrou "zombie" se réveillait plus tard.
+   */
+  watchdog(): void {
+    const now = Date.now();
+    // File FIFO — tête bloquée avec ressources libres ?
+    const head = this.queue[0];
+    if (head && this.running.size < this.maxConcurrent && now - head.enqueuedAt > QUEUE_WATCHDOG_MS) {
+      const secs = Math.round((now - head.enqueuedAt) / 1000);
+      console.error(
+        `[engine] WATCHDOG — scan ${head.cfg.scanId} en file depuis ${secs}s avec ` +
+          `${this.running.size}/${this.maxConcurrent} ressources occupées ` +
+          `(dernier kick il y a ${Math.round((now - this.lastKickAt) / 1000)}s) : re-dispatch forcé`,
+      );
+      this.pumping = false; // déverrouille un pump coincé (async jamais retourné)
+      this.pump();
+    }
+    // Chaînes séquentielles — tête bloquée avec ressources libres ?
+    for (const [campaignId, chain] of this.chains) {
+      if (
+        chain.head &&
+        this.running.size < this.maxConcurrent &&
+        now - chain.headSince > QUEUE_WATCHDOG_MS
+      ) {
+        const secs = Math.round((now - chain.headSince) / 1000);
+        console.error(
+          `[engine] WATCHDOG — tête de chaîne ${chain.head.scanId} (campagne ${campaignId}) ` +
+            `immobile depuis ${secs}s avec ${this.running.size}/${this.maxConcurrent} ` +
+            `ressources occupées : avance forcée`,
+        );
+        this.advancing.delete(campaignId); // déverrouille un advanceChain coincé
+        chain.headSince = now; // nouveau chrono (le re-dispatch est en cours)
+        this.advanceChain(campaignId);
+      }
+    }
   }
 
   /**

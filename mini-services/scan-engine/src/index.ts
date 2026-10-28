@@ -563,8 +563,13 @@ async function main(): Promise<void> {
 
   // P4 : réveil périodique de la file d'attente (filet de sécurité — une
   // erreur DB transitoire au pump est retentée dans les 30 s).
+  // RF3 (audit v2) : journalisation de l'état de dispatch + watchdog (60 s)
+  // qui force un re-dispatch si un scan reste en file/chaîne > 5 min alors
+  // que des ressources sont libres (dispatch bloqué — voir ScanEngine.watchdog).
   const kickTimer = setInterval(() => engine.kick(), QUEUE_KICK_MS);
   kickTimer.unref();
+  const watchdogTimer = setInterval(() => engine.watchdog(), 60_000);
+  watchdogTimer.unref();
 
   // socket.io intercepte /socket.io/* ; les autres requêtes (/internal/*)
   // arrivent au handler du serveur HTTP.

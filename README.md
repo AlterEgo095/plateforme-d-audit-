@@ -447,3 +447,48 @@ Authentification par cookie de session (`af_session`). Erreurs uniformes `{ "err
 ## 📜 Usage et responsabilité
 
 Ce projet est fourni à des fins d'audit de sécurité **sur des périmètres autorisés**. L'exploitation d'outils offensifs contre des systèmes sans autorisation explicite est illégale. Les auteurs et contributeurs ne sauraient être tenus responsables d'un usage inadapté.
+
+---
+
+## 🧪 Garde-fous anti-récidive (audit v2 — remédiation)
+
+### CI (`.github/workflows/auditforge.yml`)
+
+Chaque push/PR rejoue ce qui aurait bloqué les défauts passés :
+
+| Job | Garde |
+|---|---|
+| `validate` | **diff des schémas Prisma racine ⇄ moteur (RF1)** + `tsc --noEmit` (app et moteur) + `eslint` |
+| `docker-engine` | build de l'image moteur avec `--build-arg WITH_ARSENAL=1` puis vérification des **10 binaires réels** (`subfinder httpx nuclei amass ffuf nikto sqlmap semgrep trivy gitleaks`) |
+| `smoke-test` | **smoke test E2E complet** : démarrage app (moteur auto-spawné), campagne séquentielle, scans COMPLETED, export Dojo cohérent |
+
+### Smoke test local / post-déploiement
+
+```bash
+./scripts/smoke-test.sh                                  # défauts : app locale + compte démo
+SMOKE_BASE_URL=https://audit.exemple.com \
+SMOKE_USER=auditeur SMOKE_PASS='…' \
+./scripts/smoke-test.sh                                  # contre un VPS déployé
+```
+
+Variables : `SMOKE_BASE_URL`, `SMOKE_USER`, `SMOKE_PASS`, `SMOKE_TOOLS`
+(défaut `SUBFINDER,HTTPX` en chaîne séquentielle), `SMOKE_PROFILE`, `SMOKE_TIMEOUT_S`,
+`SMOKE_DOJO=0` pour désactiver la vérification DefectDojo.
+
+### Arsenal réel dans l'image moteur (multi-stage)
+
+```bash
+docker build --build-arg WITH_ARSENAL=1 -f scripts/Dockerfile.engine -t auditforge/engine .
+docker run --rm auditforge/engine sh -c 'nuclei -version && trivy --version && gitleaks version'
+```
+
+### ZAP en side-car (RF2 — exécution réelle sans binaire local)
+
+```bash
+# .env : ZAP_API_KEY=$(openssl rand -hex 32)  ZAP_API_URL=http://zap:8080
+docker compose -f scripts/docker-compose.prod.yml --profile zap up -d
+```
+
+Le daemon ZAP (réseau interne, aucun port publié) est piloté par l'adaptateur
+API du moteur : spider → scan passif → scan actif → collecte des alertes.
+`ZAP_API_URL` non définie → repli automatique sur le mode binaire.

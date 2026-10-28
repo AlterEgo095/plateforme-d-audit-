@@ -45,12 +45,47 @@ interface DojoFinding {
   verified: boolean
   date: string
   cve?: string
+  cwe?: number
   cvssv3?: number
   line_number?: number
   file_path?: string
   url?: string
+  references?: string
   unique_id_from_tool: string
   tags: string[]
+}
+
+/**
+ * F1 (audit v2) : les constats AuditForge ne portent pas de colonne CWE —
+ * l'identifiant est pourtant présent dans les preuves produites par les
+ * outils (ZAP « CWE-79 », Semgrep « CWE : 89 », Nuclei classification…).
+ * DefectDojo attend un champ top-level NUMÉRIQUE `cwe` — on l'extraie de la
+ * description + preuves + PoC (première occurrence), sinon absent.
+ */
+function extractCwe(...parts: string[]): number | undefined {
+  const m = /CWE[-\s:]*(\d{1,4})\b/i.exec(parts.filter(Boolean).join(' '))
+  if (!m) return undefined
+  const n = Number(m[1])
+  return Number.isInteger(n) && n > 0 && n <= 9999 ? n : undefined
+}
+
+/**
+ * F1 (audit v2) : DefectDojo affiche les références externes depuis le champ
+ * top-level `references` — on rassemble les URLs utiles (preuves, PoC,
+ * description, remédiation URL unique), dédupliquées, dans l'ordre de
+ * lecture, plafonnées à 5 × 500 caractères (hygiène d'import).
+ */
+function extractReferences(...parts: string[]): string | undefined {
+  const urls = new Set<string>()
+  for (const part of parts) {
+    if (!part) continue
+    for (const m of part.matchAll(/https?:\/\/[^\s)`'"<>\]]+/gi)) {
+      urls.add(m[0].slice(0, 500))
+      if (urls.size >= 5) break
+    }
+    if (urls.size >= 5) break
+  }
+  return urls.size > 0 ? Array.from(urls).join('\n') : undefined
 }
 
 async function buildDojoDocument(campaignId: string) {
@@ -77,6 +112,8 @@ async function buildDojoDocument(campaignId: string) {
     const mitigation = (f.remediation ?? '').trim()
     const cvss = typeof f.cvss === 'number' && f.cvss > 0 ? f.cvss : undefined
     const verified = f.confidence === ('CONFIRMED' satisfies Confidence)
+    const cwe = extractCwe(f.evidence, f.description, f.poc)
+    const references = extractReferences(f.evidence, f.poc, f.description)
     return {
       title: `[${f.tool}] ${f.title}`,
       severity: DOJO_SEVERITY[f.severity as Severity] ?? 'Info',
@@ -99,11 +136,13 @@ async function buildDojoDocument(campaignId: string) {
       verified,
       date: f.createdAt.toISOString().slice(0, 10),
       ...(f.cve ? { cve: f.cve } : {}),
+      ...(cwe !== undefined ? { cwe } : {}),
       ...(cvss ? { cvssv3: cvss } : {}),
       ...(isUrl ? { url: location.slice(0, 2048) } : {}),
       ...(lineMatch && !isUrl
         ? { file_path: lineMatch[1].slice(0, 1024), line_number: Number(lineMatch[2]) || 1 }
         : {}),
+      ...(references !== undefined ? { references } : {}),
       unique_id_from_tool: f.id,
       tags: [f.tool.toLowerCase(), f.category.toLowerCase()].filter(Boolean),
     }

@@ -2,7 +2,7 @@
  * /api/campaigns — liste et création de campagnes (contrats worklog §F.6, §F.7 ; §L.9/10/13)
  * GET  : toute session authentifiée (statuts recalculés paresseusement, take 100 / scans 50)
  * POST : AUDITOR+ — validation zod + compatibilité outils ⇄ cibles (§B),
- *        création campagne+scans en $transaction, lancement via Promise.allSettled
+ *        création campagne+scans en $transaction, lancement via dispatch ordonné (résultats tolérants allSettled)
  *        (seuls les scans dont l'appel moteur a échoué passent FAILED) sous verrou par campagne.
  */
 import { NextRequest, NextResponse } from 'next/server'
@@ -152,17 +152,25 @@ export const POST = withApi(async (req: NextRequest) => {
   let warning: string | undefined
   if (input.launchNow) {
     warning = await withCampaignLock(campaign.id, async () => {
-      const results = await Promise.allSettled(
-        scans.map((scan) =>
-          engineRun({
+      // P5-fix : dispatch ORDONNÉ (même logique que /launch) — la chaîne
+      // séquentielle du moteur suit l'ordre d'arrivée des /internal/run ;
+      // les appels partent séquentiellement dans l'ordre de création des
+      // scans, résultats conservés au format allSettled.
+      const results: PromiseSettledResult<unknown>[] = []
+      for (const scan of scans) {
+        try {
+          await engineRun({
             scanId: scan.id,
             tool: scan.tool as Tool,
             target,
             targetType: input.targetType,
             profile: input.profile,
           })
-        )
-      )
+          results.push({ status: 'fulfilled', value: undefined })
+        } catch (reason) {
+          results.push({ status: 'rejected', reason })
+        }
+      }
       const failedIds = scans
         .filter((_, i) => results[i].status === 'rejected')
         .map((s) => s.id)

@@ -6,7 +6,9 @@
  * - 409 si un outil DEMANDÉ a déjà un scan actif (QUEUED/RUNNING) sur la campagne ;
  * - sinon crée un NOUVEAU scan QUEUED pour CHAQUE outil demandé (ré-exécution,
  *   même si des scans finis de cet outil existent) + campagne → RUNNING ;
- * - appels moteur en Promise.allSettled : seuls les scans dont l'appel a échoué
+ * - appels moteur dispatchés DANS L'ORDRE des scans (la chaîne séquentielle
+ *   du moteur suit l'ordre d'arrivée des /internal/run) ; résultats tolérants
+ *   au format allSettled : seuls les scans dont l'appel a échoué
  *   passent FAILED ; campagne FAILED uniquement si TOUS ont échoué (sinon RUNNING) ;
  * - warning si au moins un échec.
  * Le tout sous verrou applicatif par campagne (src/lib/mutex.ts).
@@ -37,7 +39,8 @@ export const POST = withApi<{ id: string }>(async (req, { params }) => {
   const raw = await req.json().catch(() => null)
   const parsed = launchSchema.safeParse(raw)
   if (!parsed.success) {
-    return NextResponse.json({ error: 'Outils invalides — tableau de 1 à 4 outils requis' }, { status: 400 })
+    // P5 arsenal : le lot accepte jusqu'à 8 outils (zod max(8) ci-dessus).
+    return NextResponse.json({ error: 'Outils invalides — tableau de 1 à 8 outils requis' }, { status: 400 })
   }
   const tools: Tool[] = parsed.data.tools
   if (new Set(tools).size !== tools.length) {
@@ -97,18 +100,27 @@ export const POST = withApi<{ id: string }>(async (req, { params }) => {
       return { scans: createdScans }
     })
 
-    // Appels moteur tolérants (§L.9) : allSettled, seuls les échecs passent FAILED.
-    const results = await Promise.allSettled(
-      scans.map((scan) =>
-        engineRun({
+    // Appels moteur tolérants (§L.9) : seuls les échecs passent FAILED.
+    // P5-fix : dispatch ORDONNÉ — le moteur assemble la chaîne séquentielle
+    // dans l'ordre d'arrivée des /internal/run ; Promise.allSettled (parallèle)
+    // inversait parfois cet ordre (recon ⇄ DAST). Les appels partent donc
+    // séquentiellement, dans l'ordre de création des scans, et les résultats
+    // conservent la forme allSettled (fulfilled/rejected).
+    const results: PromiseSettledResult<unknown>[] = []
+    for (const scan of scans) {
+      try {
+        await engineRun({
           scanId: scan.id,
           tool: scan.tool as Tool,
           target: campaign.target,
           targetType,
           profile: campaign.profile as Profile,
         })
-      )
-    )
+        results.push({ status: 'fulfilled', value: undefined })
+      } catch (reason) {
+        results.push({ status: 'rejected', reason })
+      }
+    }
     const failedIds = scans
       .filter((_, i) => results[i].status === 'rejected')
       .map((s) => s.id)

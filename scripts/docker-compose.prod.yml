@@ -175,6 +175,14 @@ services:
       REDAMON_API_URL: ${REDAMON_API_URL:-}
       REDAMON_EMAIL: ${REDAMON_EMAIL:-}
       REDAMON_PASSWORD: ${REDAMON_PASSWORD:-}
+      # ── RF2 (audit v2) : OWASP ZAP en side-car (profil compose « zap ») ──
+      # Démarrez avec : docker compose --profile zap up -d
+      # ZAP_API_URL définie → l'adaptateur ZAP du moteur pilote l'API REST du
+      # daemon (spider/passif/actif/alertes) : exécution réelle sans binaire
+      # local. Vide (défaut) → mode binaire zap-baseline.py (simulation s'il
+      # n'est pas installé).
+      ZAP_API_URL: ${ZAP_API_URL:-}
+      ZAP_API_KEY: ${ZAP_API_KEY:-}
     volumes:
       - auditforge-data:/data
       # P0.3 : plus AUCUN docker.sock monté ici — le moteur passe par le
@@ -199,6 +207,38 @@ services:
       docker-proxy:
         condition: service_healthy # P1 : scans réels impossibles sans proxy
     # Aucun `ports:` : moteur strictement confiné au réseau interne Docker.
+
+  # ── OWASP ZAP (RF2 — audit v2) : side-car optionnel (profil « zap ») ─────
+  # ZAP est une application Java lourde : plutôt que de gonfler l'image moteur,
+  # il tourne comme daemon dédié piloté par son API REST (ZAP_API_URL côté
+  # moteur). AUCUN port publié — joignable du moteur uniquement via le réseau
+  # interne `data` (http://zap:8080). Le réseau `edge` lui donne une SORTIE
+  # Internet : un daemon DAST doit joindre les cibles qu'on lui confie.
+  # Activation :  docker compose -f docker-compose.prod.yml --profile zap up -d
+  zap:
+    image: ghcr.io/zaproxy/zaproxy:stable
+    profiles: [zap]
+    command: >
+      zap.sh -daemon -host 0.0.0.0 -port 8080
+      -config api.addrs.addr.name=.*
+      -config api.addrs.addr.regex=true
+      -config api.key=$${ZAP_API_KEY}
+      -config api.disablekey=false
+    environment:
+      ZAP_API_KEY: ${ZAP_API_KEY:?Renseignez ZAP_API_KEY dans le .env (openssl rand -hex 32) — le daemon ZAP refuse une clé vide}
+    volumes:
+      - zap-data:/zap/.ZAP # sessions/plugins persistants entre redémarrages
+    restart: unless-stopped
+    logging: *default-logging
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL] # écoute 8080 (>1024) : aucune capability requise
+    mem_limit: ${ZAP_MEM_LIMIT:-2g} # JVM DAST — 2 Go recommandés
+    cpus: "${ZAP_CPUS:-1.5}"
+    pids_limit: 512
+    stop_grace_period: 60s # le daemon doit finaliser ses sessions
+    networks: [edge, data]
+    # Aucun `ports:` — exposition réseau nulle hors compose.
 
   # ── Sauvegarde planifiée (P1 — suite P0-1) ────────────────────────────────
   # Sidecar : sauvegarde froide de la base (checkpoint WAL + intégrité +
@@ -287,6 +327,7 @@ services:
 
 volumes:
   auditforge-data: # base SQLite partagée (app ⇄ moteur, mode WAL)
+  zap-data: # sessions/plugins OWASP ZAP (side-car, profil zap)
   caddy-data: # certificats TLS (HTTPS automatique)
   caddy-config:
 

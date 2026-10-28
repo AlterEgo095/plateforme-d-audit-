@@ -92,8 +92,17 @@ export const REAL_EXEC = {
   // Scan dynamique (DAST)
   nucleiBin: (process.env.NUCLEI_BIN ?? "nuclei").trim(),
   niktoBin: (process.env.NIKTO_BIN ?? "nikto").trim(),
-  /** Script d'automatisation OWASP ZAP (baseline CI). */
+  /** Script d'automatisation OWASP ZAP (baseline CI) — mode binaire. */
   zapCommand: (process.env.ZAP_COMMAND ?? "zap-baseline.py").trim(),
+  /**
+   * RF2 (audit v2) : API REST du daemon ZAP (side-car compose
+   * ghcr.io/zaproxy/zaproxy). Définie → l'adaptateur ZAP pilote l'API
+   * (spider/passif/actif/alertes) au lieu du binaire local ; la
+   * disponibilité est TRUE dès que l'API répond. Vide → mode binaire.
+   */
+  zapApiUrl: (process.env.ZAP_API_URL ?? "").trim().replace(/\/+$/, ""),
+  /** Clé API du daemon ZAP (en-tête X-Zap-Api-Key). Vide si non protégé. */
+  zapApiKey: (process.env.ZAP_API_KEY ?? "").trim(),
   // Analyse de code (SAST/SCA/secrets)
   semgrepBin: (process.env.SEMGREP_BIN ?? "semgrep").trim(),
   /** Règles Semgrep : « auto » (registre, réseau requis) ou chemin de règles local. */

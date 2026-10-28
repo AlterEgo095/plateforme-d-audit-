@@ -28,6 +28,9 @@ model Campaign {
   targetType  String // URL | GIT | NETWORK
   profile     String // QUICK | STANDARD | DEEP
   status      String   @default("DRAFT") // DRAFT | RUNNING | COMPLETED | FAILED | CANCELLED
+  // P5 : exécution séquentielle (chaîne d'outils) — les scans démarrent l'un
+  // après l'autre (recon → DAST → exploitation) au lieu de courir en parallèle.
+  sequential  Boolean  @default(false)
   createdById String
   createdBy   User     @relation(fields: [createdById], references: [id])
   createdAt   DateTime @default(now())
@@ -84,6 +87,11 @@ model Finding {
 
   @@index([scanId])
   @@index([status])
+  // P4 : audits profonds → des milliers de constats. Le listing trie par
+  // createdAt desc et filtre par sévérité/outil — index dédiés.
+  @@index([createdAt])
+  @@index([severity])
+  @@index([tool])
 }
 
 model ScanLog {
@@ -97,6 +105,10 @@ model ScanLog {
 
   @@index([scanId])
   @@index([ts])
+  // P4 : index composite (scanId, ts) — le chemin chaud du terminal live et
+  // de la relecture des logs d'un scan DEEP (des dizaines de milliers de
+  // lignes filtrées par scan et triées par horodatage).
+  @@index([scanId, ts])
 }
 
 model AuditTrail {

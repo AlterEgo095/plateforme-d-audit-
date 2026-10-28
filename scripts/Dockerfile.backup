@@ -1,0 +1,30 @@
+# ── AuditForge — sidecar de sauvegarde planifiée (P1, suite P0-1) ───────────
+# Image minimale : Alpine + CLI sqlite3 + script de sauvegarde P0-1.
+# Exécuté par le service `backup` de docker-compose.prod.yml : montage du
+# volume SQLite (checkpoint WAL possible) et d'un répertoire hôte pour les
+# sauvegardes — la base est copiée FROIDE (intégrité vérifiée), rotation KEEP.
+#
+# Variables (déjà posées ci-dessous, surchargables dans le compose) :
+#   DB_PATH                 — chemin de la base dans le conteneur (/data/…)
+#   BACKUP_DIR              — destination des sauvegardes (/backups)
+#   KEEP                    — rotation (défaut 7)
+#   BACKUP_INTERVAL_SECONDS — période entre deux sauvegardes (défaut 86400 = 24 h)
+
+FROM alpine:3.20
+
+RUN apk add --no-cache sqlite
+
+COPY scripts/auditforge-backup.sh /usr/local/bin/auditforge-backup.sh
+RUN chmod +x /usr/local/bin/auditforge-backup.sh
+
+ENV DB_PATH=/data/auditforge.db \
+    BACKUP_DIR=/backups \
+    KEEP=7 \
+    BACKUP_INTERVAL_SECONDS=86400
+
+# Boucle simple (pas de crond à configurer) : première sauvegarde immédiate
+# au démarrage, puis une par période. Le script est non fatal (`|| true`) :
+# un incident (base absente au boot, disque plein…) est journalisé et la
+# boucle repart à la période suivante — restart: unless-stopped complète.
+ENTRYPOINT ["/bin/sh", "-c", \
+  "while true; do /usr/local/bin/auditforge-backup.sh || true; sleep \"${BACKUP_INTERVAL_SECONDS:-86400}\"; done"]

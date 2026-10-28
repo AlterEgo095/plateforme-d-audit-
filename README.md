@@ -124,7 +124,7 @@ Notes :
 
 ### Prérequis de l'exécution réelle
 
-1. **Docker** accessible par le moteur (en Docker Compose : montage `/var/run/docker.sock` déjà prévu) ;
+1. **Docker** accessible par le moteur — en Docker Compose : **proxy Docker filtrant** (P0.3, audit v2) — le moteur ne monte plus `/var/run/docker.sock` en brut : il passe par le service `docker-proxy` qui n'expose que les endpoints nécessaires aux sandboxes (containers/images/networks/volumes + POST) et bloque build/exec/secrets/swarm ;
 2. **Binaires installés** : `pip install phantom-agent` et `pipx install basalt-scan` (l'image `Dockerfile.engine` les installe automatiquement) ;
 3. **Premier scan Phantom** : l'image sandbox Kali (~13 Go) est téléchargée une seule fois ;
 4. **Cibles autorisées** : Phantom et RedAmon acceptent les cibles URL et réseau ; Basalt et DeepAudit auditent du code (cibles GIT — clonée par le moteur pour Basalt, par la plateforme pour DeepAudit) ;
@@ -232,6 +232,18 @@ docker compose up -d --build
 | `ADMIN_USERNAME` / `ADMIN_PASSWORD` (app) | Premier compte ADMIN créé au premier démarrage (amorçage) | — |
 | `MAX_CONCURRENT_SCANS` (engine) | Plafond global de scans simultanés (protection VPS) | `3` |
 | `SITE_ORIGIN` (engine) | Origine autorisée pour les handshakes socket.io (CORS) | réflexif |
+| `PHANTOM_IMAGE` (engine) | Image sandbox Kali de Phantom (vide = défaut amont) | — |
+| `PHANTOM_COMPRESSOR_LLM` (engine) | Modèle LiteLLM du compresseur mémoire de Phantom | `PHANTOM_LLM` amont |
+| `DOCKER_HOST` (engine) | Endpoint Docker des sandboxes — posé par le compose vers le proxy filtrant | `tcp://docker-proxy:2375` |
+| `BACKUP_HOST_DIR` (backup) | Répertoire hôte des sauvegardes planifiées (sidecar `backup`) | `/opt/auditforge/backups` |
+| `BACKUP_KEEP` / `BACKUP_INTERVAL_SECONDS` (backup) | Rotation (nombre) et période (s) des sauvegardes | `7` / `86400` |
+
+### Sauvegarde et restauration (P0-1 + P1)
+
+- **Sauvegarde planifiée** : le service `backup` (compose prod) exécute `scripts/auditforge-backup.sh` au démarrage puis toutes les `BACKUP_INTERVAL_SECONDS` (24 h par défaut) : checkpoint WAL, copie froide, `integrity_check`, rotation `BACKUP_KEEP` (7). Les fichiers sont écrits dans le répertoire **hôte** `BACKUP_HOST_DIR` (défaut `/opt/auditforge/backups`) — ils survivent à `docker compose down -v`.
+- **Sauvegarde manuelle (cron hôte)** : le script fonctionne aussi directement sur l'hôte (chemins par défaut) — `30 3 * * * /opt/auditforge/scripts/auditforge-backup.sh >> /opt/auditforge/backups/backup.log 2>&1`.
+- **Restauration** : `sudo scripts/auditforge-restore.sh /opt/auditforge/backups/auditforge-<TS>.db --auto` — vérifie l'intégrité **avant** toute modification, arrête `app`/`engine`/`backup`, conserve l'état courant (`*.pre-restore-<TS>`, jamais détruit), installe la sauvegarde, re-vérifie l'intégrité, relance la pile. `--dry-run` affiche le plan sans rien toucher.
+- **Testez la restauration** après le premier déploiement (sur une copie, avec `--dry-run` puis un vrai run) — une sauvegarde non testée n'est pas une sauvegarde.
 
 ---
 
@@ -246,7 +258,8 @@ docker compose up -d --build
 - **RBAC** serveur sur **tous** les endpoints (VIEWER / AUDITOR / ADMIN) + validations d'entrée **Zod** systématiques.
 - **Token interne** `x-internal-token` exigé par chaque route `/internal/*` du moteur (les API d'orchestration ne sont pas exposées publiquement).
 - **Socket.io authentifié au handshake** : cookie de session **ou** token signé (`GET /api/auth/socket-token`), rooms plafonnées (20/socket).
-- **Confinement réseau** (Docker) : seul Caddy est publié ; le moteur n'écoute que sur le réseau interne et jamais sur l'hôte ; en local, il n'écoute que sur `127.0.0.1`.
+- **Confinement réseau** (Docker) : seul Caddy est publié ; le moteur n'écoute que sur le réseau interne et jamais sur l'hôte ; en local, il n'écoute que sur `127.0.0.1`. Le démon Docker de l'hôte n'est jamais exposé au moteur en brut : **proxy Docker filtrant** (`docker-proxy` — endpoints sandboxes uniquement, build/exec/secrets/swarm refusés, healthcheck P1 : le moteur ne démarre que si le proxy répond).
+- **Sauvegarde/restauration** : sauvegardes froides planifiées (checkpoint WAL + `integrity_check` + rotation) hors du volume Docker, script de restauration gardé-fou (rollback automatique en cas d'échec d'intégrité).
 - **Journal d'audit** immuable : connexion/déconnexion, création/lancement de campagnes, annulations, changements de statut des constats, générations de rapports.
 - **Robustesse** : wrapper d'erreurs uniforme (aucune fuite de stack), récupération au boot (scans orphelins → `FAILED`), arrêt gracieux (SIGTERM → scans finalisés `CANCELLED`), verrous applicatifs par campagne (anti course-critique), sanitization des cibles avant interpolation dans les logs.
 

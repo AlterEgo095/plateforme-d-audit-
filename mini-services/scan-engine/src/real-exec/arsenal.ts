@@ -69,6 +69,48 @@ function httpProbeTarget(target: string, targetType: TargetType): string {
   return `https://${target}`;
 }
 
+/**
+ * Pré-vol : sonde de joignabilité HTTP d'une cible URL (12 s max par schéma).
+ * Toute réponse HTTP — même 4xx/5xx — est réputée joignable ; seul un échec
+ * réseau (DNS, connexion, TLS) est rédhibitoire. Repli http si https échoue
+ * (hébergement sans TLS). Objectif : ne jamais présenter un « COMPLETED —
+ * 0 constat » trompeur quand la cible est morte.
+ */
+export async function probeUrlTarget(
+  target: string,
+  timeoutMs = 12_000,
+): Promise<{ ok: boolean; detail: string }> {
+  const url = baseOfUrl(target);
+  const headers = { "user-agent": "AuditForge-Engine/1.0 (+pre-flight probe)" };
+  try {
+    const res = await fetch(url, {
+      method: "GET",
+      redirect: "follow",
+      signal: AbortSignal.timeout(timeoutMs),
+      cache: "no-store",
+      headers,
+    });
+    return { ok: true, detail: `HTTP ${res.status}` };
+  } catch (errHttps) {
+    if (!/^https:/i.test(url)) return { ok: false, detail: String(errHttps) };
+    try {
+      const alt = url.replace(/^https:/i, "http:");
+      const res = await fetch(alt, {
+        method: "GET",
+        redirect: "follow",
+        signal: AbortSignal.timeout(timeoutMs),
+        cache: "no-store",
+        headers,
+      });
+      return { ok: true, detail: `HTTP ${res.status} (via http, https injoignable)` };
+    } catch (errHttp) {
+      const mHttps = errHttps instanceof Error ? errHttps.message : String(errHttps);
+      const mHttp = errHttp instanceof Error ? errHttp.message : String(errHttp);
+      return { ok: false, detail: `HTTPS : ${mHttps} ; HTTP : ${mHttp}` };
+    }
+  }
+}
+
 /** Hostnames « intéressants » — méritent un constat individuel en recon. */
 const INTERESTING_HOST_RE =
   /(^|\.)(admin|portal|vpn|mail|smtp|api|dev|test|staging|uat|preprod|pre-prod|old|legacy|backup|git|gitlab|jenkins|jira|confluence|cpanel|direct|intranet|internal|sso|auth|db|sql|mysql|postgres|redis|kibana|grafana|elastic|monitor|nagios|zabbix|prod|internal-|kube|eks|aks|gke)[.-]/i;
@@ -256,6 +298,17 @@ export function makeArsenalAdapter(spec: ArsenalSpec): RealToolAdapter {
 
       if (result.aborted) throw new Error("Scan annulé pendant l'exécution de l'outil");
       if (result.timedOut) throw new Error(`Scan ${spec.tool} : timeout global atteint`);
+
+      // Honnêteté : un CLI qui rejette une option (flag invalide) imprime son
+      // aide et sort avec le code 0 — sans ce garde, le scan serait marqué
+      // COMPLETED avec 0 constat alors que l'outil n'a jamais scanné
+      // (ex. nikto et « Unknown option: nolsl »).
+      const rejectedOption = stdout.find((l) => /unknown option/i.test(l));
+      if (rejectedOption) {
+        throw new Error(
+          `${spec.tool} a rejeté ses options (« ${rejectedOption.trim().slice(0, 120)} ») — commande invalide, outil non exécuté.`,
+        );
+      }
 
       await ctx.onPhase("RAPPORT", 92);
       let findings: RealFinding[] = [];
@@ -614,10 +667,13 @@ const niktoSpec: ArsenalSpec = {
   async build(ctx) {
     const probe = httpProbeTarget(ctx.target, ctx.targetType);
     const reportPath = join(ctx.workdir, "nikto.json");
+    // nikto 2.5 : « -nolsl » et « -Timeout » n'existent pas → l'outil imprimait
+    // son aide et sortait code 0 (faux COMPLETED). Options valides conservées :
+    // -nolookup (pas de DNS inverse), -nointeractive (pas de prompt).
     return {
-      args: ["-h", probe, "-Format", "json", "-o", reportPath, "-nolookup", "-nolsl", "-Timeout", "10"],
+      args: ["-h", probe, "-Format", "json", "-o", reportPath, "-nolookup", "-nointeractive"],
       reportPath,
-      cmdLabel: `nikto -h ${probe} -Format json -o nikto.json -nolookup -nolsl`,
+      cmdLabel: `nikto -h ${probe} -Format json -o nikto.json -nolookup -nointeractive`,
     };
   },
   async parse({ reportPath }) {
@@ -672,9 +728,11 @@ function zapAlertFinding(a: Record<string, unknown>): RealFinding | null {
   if (!name) return null;
   const instances = Array.isArray(a.instances) ? (a.instances as Record<string, unknown>[]) : [];
   const first = instances[0] ?? {};
-  const uri = String(first.uri ?? "").trim();
-  const param = String(first.param ?? "").trim();
-  const evidence = String(first.evidence ?? "").trim();
+  // Vue /JSON/core/view/alerts : champs à plat (url/param/evidence) ;
+  // instances[] n'existe que dans le JSON du rapport (-J). Lire les deux.
+  const uri = String(a.url ?? first.uri ?? "").trim();
+  const param = String(a.param ?? first.param ?? "").trim();
+  const evidence = String(a.evidence ?? first.evidence ?? "").trim();
   const riskcode = String(a.riskcode ?? "0");
   const zapConf = String(a.confidence ?? "0");
   return {
@@ -843,10 +901,12 @@ class ZapApiAdapter implements RealToolAdapter {
     }
 
     // 1) Spider classique (découverte des URL) — 10 % → 45 %.
+    let spiderOk = false;
     await ctx.onPhase("SPIDER", 10);
     try {
       await this.api("/JSON/spider/action/scan/", { url: target });
       await this.pollUntil(ctx, "SPIDER", "/JSON/spider/view/status/", {}, (v) => Number(v.status ?? 0));
+      spiderOk = true;
     } catch (err) {
       if (ctx.signal.aborted) throw err;
       await ctx.onLog(`spider : ${String(err)} — poursuite sans spider`, "WARN", "zap");
@@ -869,6 +929,7 @@ class ZapApiAdapter implements RealToolAdapter {
     }
 
     // 3) Scan actif (politique par défaut) — 55 % → 90 %.
+    let ascanOk = false;
     await ctx.onPhase("SCAN ACTIF", 55);
     try {
       const started = await this.api<{ scan?: string }>("/JSON/ascan/action/scan/", {
@@ -880,6 +941,7 @@ class ZapApiAdapter implements RealToolAdapter {
         throw new Error(`ascan non démarré (${JSON.stringify(started).slice(0, 200)})`);
       }
       await this.pollUntil(ctx, "SCAN ACTIF", "/JSON/ascan/view/status/", {}, (v) => Number(v.status ?? 0));
+      ascanOk = true;
     } catch (err) {
       if (ctx.signal.aborted) throw err;
       await ctx.onLog(`scan actif : ${String(err)} — les alertes passives restent collectées`, "WARN", "zap");
@@ -903,6 +965,13 @@ class ZapApiAdapter implements RealToolAdapter {
       start += alerts.length;
     }
     await ctx.onLog(`ZAP : ${all.length} alerte(s) collectée(s)`, "TOOL", "zap");
+    // Honnêteté : si NI le spider NI le scan actif n'ont pu auditer la cible,
+    // « 0 alerte » serait un faux COMPLETED — échec explicite à la place.
+    if (!spiderOk && !ascanOk) {
+      throw new Error(
+        "ZAP n'a pu auditer la cible : spider et scan actif ont échoué (cible injoignable depuis le daemon ZAP ?)",
+      );
+    }
     const findings: RealFinding[] = [];
     for (const a of all) {
       const f = zapAlertFinding(a);

@@ -35,6 +35,7 @@ import {
 import { currentExecMode, getRealAdapter } from "./real-exec/index";
 import { REAL_EXEC } from "./real-exec/env";
 import { makeWorkdir, removeWorkdir } from "./real-exec/proc";
+import { probeUrlTarget } from "./real-exec/arsenal";
 import type { RealFinding, RealToolAdapter } from "./real-exec/types";
 // Import de TYPE uniquement (aucun cycle à l'exécution) — interface définie dans index.ts.
 import type { ServerToClientEvents } from "./index";
@@ -979,6 +980,26 @@ export class ScanEngine {
         `MODE RÉEL — ${cfg.tool} sera exécuté authentiquement (adaptateur réel, profil ${cfg.profile}).`,
       );
       await flushPending();
+
+      // Pré-vol (honnêteté des statuts) : une cible URL injoignable ne doit
+      // ni produire un « COMPLETED — 0 constat » trompeur, ni laisser l'outil
+      // griller son timeout global (ex. ffuf × wordlist sur un hôte mort).
+      // Toute réponse HTTP — même 4xx/5xx — est considérée comme joignable.
+      // Cibles GIT (dépôt local) et NETWORK (sonde outil-native) exemptées.
+      if (cfg.targetType === "URL") {
+        pushLog("INFO", "systeme", `Pré-vol : vérification de joignabilité de ${cfg.target}…`);
+        await flushPending();
+        const probe = await probeUrlTarget(cfg.target);
+        if (!probe.ok) {
+          pushLog("ERROR", "systeme", `Cible injoignable depuis le moteur — ${probe.detail.slice(0, 300)}`);
+          await flushPending();
+          throw new Error(
+            `Cible injoignable depuis le moteur (${probe.detail.slice(0, 200)}) — ${cfg.tool} non exécuté.`,
+          );
+        }
+        pushLog("INFO", "systeme", `Pré-vol OK — ${probe.detail}.`);
+        await flushPending();
+      }
 
       // Progression heuristique (temps écoulé / durée estimée) — plafonnée à 95 %.
       const ticker = setInterval(() => {

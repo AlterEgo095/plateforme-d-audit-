@@ -1322,7 +1322,7 @@ export const FINDING_POOLS: Record<Tool, FindingTemplate[]> = {
         "OSVDB-3268 : /icons/ directory indexing enabled\n" +
         "OSVDB-3233 : /doc/ — documentation Apache exposée\n" +
         "OSVDB-12184 : /index.php?=PHPB8B5F2A0-3C92-11d3-A3A9-4C7B08C10000 → phpinfo partiel",
-      poc: "nikto -h https://<TARGET> -Format json -o nikto.json -nolookup -nolsl",
+      poc: "nikto -h https://<TARGET> -Format json -o nikto.json -nolookup -nointeractive",
       remediation: "Purger les fichiers d'installation/défaut ; restreindre /doc, /icons ; durcir la configuration serveur.",
       sentinel: false,
     },
@@ -2357,7 +2357,7 @@ export const SCRIPT_BUILDERS: Record<Tool, (ctx: ScriptCtx) => ScriptLine[]> = {
     assemble("NIKTO", ctx, [
       [
         { level: "INFO", source: "nikto", message: `coup d'œil serveur sur ${hostOf(ctx.target)} (sans lookup, sans SSL lent)` },
-        { level: "CMD", source: "nikto", message: "$ nikto -h <cible> -Format json -o nikto.json -nolookup -nolsl -Timeout 10" },
+        { level: "CMD", source: "nikto", message: "$ nikto -h <cible> -Format json -o nikto.json -nolookup -nointeractive" },
       ],
       [
         { level: "INFO", source: "nikto", message: "6 500 tests planifiés — plugins tuning 123bde" },

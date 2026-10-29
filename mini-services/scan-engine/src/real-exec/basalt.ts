@@ -21,6 +21,7 @@ import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { readFile } from "node:fs/promises";
 import { REAL_EXEC } from "./env";
+import { probeLlmEndpoint } from "./llm-probe";
 import { prepareTarget } from "./git-target";
 import { probeVersion, runStreaming } from "./proc";
 import type {
@@ -96,6 +97,17 @@ export class BasaltAdapter implements RealToolAdapter {
         reason: "Docker requis pour l'exécution des PoC en sandbox sans réseau",
         version,
       };
+    }
+    // P5-fix : sonde LLM réelle (1 token) — les rôles red/purple/blue/grader
+    // sont des agents IA ; un endpoint à sec (HTTP 402) doit être visible
+    // dans tools-status, pas découvert au milieu d'un scan échoué.
+    const llm = await probeLlmEndpoint({
+      apiKey: REAL_EXEC.llmApiKey,
+      apiBase: REAL_EXEC.llmApiBase,
+      model: process.env.BASALT_MODEL ?? "glm-4.6",
+    });
+    if (!llm.ok) {
+      return { available: false, reason: `LLM hors service : ${llm.reason}`, version };
     }
     return { available: true, version };
   }

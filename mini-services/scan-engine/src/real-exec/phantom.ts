@@ -19,6 +19,7 @@
 import { REAL_EXEC } from "./env";
 import { prepareTarget } from "./git-target";
 import { MAX_LINE_LENGTH_HARD, probeVersion, runStreaming } from "./proc";
+import { probeLlmEndpoint, stripLlmProvider } from "./llm-probe";
 import type {
   RealAdapterContext,
   RealAvailability,
@@ -227,6 +228,17 @@ export class PhantomAdapter implements RealToolAdapter {
         version,
       };
     }
+    // P5-fix : sonde LLM réelle (1 token) — l'agent ne peut rien faire sans
+    // raisonnement ; un endpoint à sec (HTTP 402) doit être visible dans
+    // tools-status, pas découvert au milieu d'un scan échoué.
+    const llm = await probeLlmEndpoint({
+      apiKey: REAL_EXEC.llmApiKey,
+      apiBase: REAL_EXEC.llmApiBase,
+      model: stripLlmProvider(REAL_EXEC.phantomLlm || "glm-4.6"),
+    });
+    if (!llm.ok) {
+      return { available: false, reason: `LLM hors service : ${llm.reason}`, version };
+    }
     return { available: true, version };
   }
 
@@ -236,6 +248,19 @@ export class PhantomAdapter implements RealToolAdapter {
   async run(ctx: RealAdapterContext): Promise<RealFinding[]> {
     const target = await prepareTarget(ctx);
     const mode = ctx.profile === "QUICK" ? "quick" : ctx.profile === "DEEP" ? "deep" : "standard";
+
+    // P5-fix : re-sonde LLM juste avant l'exécution (l'état de checkAvailable
+    // peut dater — cache tools-status 60 s, solde épuisé entre-temps). Échec
+    // IMMÉDIAT avec cause claire plutôt que 20 s de sandbox morte puis
+    // « JSON final illisible ».
+    const llm = await probeLlmEndpoint({
+      apiKey: REAL_EXEC.llmApiKey,
+      apiBase: REAL_EXEC.llmApiBase,
+      model: stripLlmProvider(REAL_EXEC.phantomLlm || "glm-4.6"),
+    });
+    if (!llm.ok) {
+      throw new Error(`Phantom impossible : LLM hors service — ${llm.reason}`);
+    }
 
     // Garde-fou anti-faux « 0 vulnérabilité » : une cible HTTP injoignable
     // (site hors ligne, pare-feu, geo-bloc, ban IP) ferait tourner l'agent

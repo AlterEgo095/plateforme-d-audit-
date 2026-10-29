@@ -40,7 +40,9 @@ services:
       dockerfile: Dockerfile
     environment:
       NODE_ENV: production
-      DATABASE_URL: file:/data/auditforge.db
+      # connection_limit=1 : un seul écrivain par process (SQLite multi-process)
+      # socket_timeout=30 : tolère les stalls fsync sous charge (P1008 18:34)
+      DATABASE_URL: file:/data/auditforge.db?connection_limit=1&socket_timeout=30
       AUTH_SECRET: ${AUTH_SECRET:?Renseignez AUTH_SECRET dans le fichier .env (openssl rand -hex 32)}
       ENGINE_INTERNAL_TOKEN: ${ENGINE_INTERNAL_TOKEN:?Renseignez ENGINE_INTERNAL_TOKEN dans le fichier .env (openssl rand -hex 32)}
       ENGINE_URL: http://engine:3030
@@ -85,7 +87,10 @@ services:
       # ── Tout le reste est REFUSÉ (défaut 0) ──
       BUILD: 0
       COMMIT: 0
-      EXEC: 0
+      # P5 : docker exec requis par les agents DEEPAUDIT/PHANTOM (chaque outil
+      # est exécuté via `docker exec <sandbox>` — incident 2026-10-29 : EXEC:0
+      # → 403 « unable to upgrade to tcp » → sandbox non opérationnelle).
+      EXEC: 1
       SYSTEM: 0
       SECRETS: 0
       SERVICES: 0
@@ -129,7 +134,9 @@ services:
       dockerfile: scripts/Dockerfile.engine
     environment:
       NODE_ENV: production
-      DATABASE_URL: file:/data/auditforge.db
+      # connection_limit=1 + socket_timeout=30 : idem app (écritures concurrentes
+      # app ⇄ moteur sur le même fichier SQLite partagé, WAL).
+      DATABASE_URL: file:/data/auditforge.db?connection_limit=1&socket_timeout=30
       AUTH_SECRET: ${AUTH_SECRET:?Renseignez AUTH_SECRET dans le fichier .env (openssl rand -hex 32)}
       ENGINE_INTERNAL_TOKEN: ${ENGINE_INTERNAL_TOKEN:?Renseignez ENGINE_INTERNAL_TOKEN dans le fichier .env (openssl rand -hex 32)}
       BIND_HOST: 0.0.0.0
@@ -189,6 +196,14 @@ services:
       # proxy interne `docker-proxy` (voir service ci-dessus).
     restart: unless-stopped
     stop_grace_period: 150s # P0.4 : SHUTDOWN_GRACE_MS=90s + marge (audit v2)
+    # ── P5 : résolution host.docker.internal (tool-server des sandboxes) ──
+    # phantom._resolve_docker_host() (patché, Dockerfile.engine n°2bis) retourne
+    # host.docker.internal : la sandbox publie son tool-server sur les ports de
+    # l'HÔTE. Sans extra_hosts, le nom ne résout pas depuis le conteneur →
+    # ~144 s de healthchecks en échec → exit 1 « JSON final illisible »
+    # (incident 2026-10-29 : override.yml manquant sur le VPS).
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     # ── P2 : confinement & ressources ──
     # NB : les sandboxes Phantom/Basalt sont des conteneurs du DÉMON hôte
     # (créés via docker-proxy) — leur empreinte mémoire/CPU n'est PAS plafonnée

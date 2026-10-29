@@ -667,13 +667,14 @@ const niktoSpec: ArsenalSpec = {
   async build(ctx) {
     const probe = httpProbeTarget(ctx.target, ctx.targetType);
     const reportPath = join(ctx.workdir, "nikto.json");
-    // nikto 2.5 : « -nolsl » et « -Timeout » n'existent pas → l'outil imprimait
-    // son aide et sortait code 0 (faux COMPLETED). Options valides conservées :
-    // -nolookup (pas de DNS inverse), -nointeractive (pas de prompt).
+    // nikto 2.6.1 (image moteur) : « -nolsl »/« -Timeout » n'existent pas (2.5 :
+    // aide + exit 0) et « -nolookup » provoque un exit 1 SILENT — d'où le garde
+    // « Unknown option » plus haut. Options valides 2.6.1 uniquement :
+    // -nointeractive (pas de prompt), -nocheck (pas de check de MAJ réseau).
     return {
-      args: ["-h", probe, "-Format", "json", "-o", reportPath, "-nolookup", "-nointeractive"],
+      args: ["-h", probe, "-Format", "json", "-o", reportPath, "-nointeractive", "-nocheck"],
       reportPath,
-      cmdLabel: `nikto -h ${probe} -Format json -o nikto.json -nolookup -nointeractive`,
+      cmdLabel: `nikto -h ${probe} -Format json -o nikto.json -nointeractive -nocheck`,
     };
   },
   async parse({ reportPath }) {

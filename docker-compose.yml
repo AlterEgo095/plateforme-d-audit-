@@ -217,23 +217,51 @@ services:
     # `docker-ctrl` (tcp://docker-proxy:2375) — UNIQUEMENT depuis le moteur.
     # Ne PAS publier 2375 sur l'hôte.
 
-  # ── Pont LLM OpenAI-compatible (Z.ai) — optionnel ──────────────────────────
-  # Utile pour exposer un endpoint /v1 unique aux outils sans y placer la clé.
-  # Sans clé Z.ai intégrée au SDK hors sandbox : préférez LLM_API_BASE direct.
-  # llm-bridge:
-  #   build:
-  #     context: .
-  #     dockerfile: Dockerfile.bridge
-  #   environment:
-  #     LLM_BRIDGE_KEY: ${LLM_BRIDGE_KEY:-}
-  #     BIND_HOST: 0.0.0.0
-  #   restart: unless-stopped
-  #   # P2 : confinement & ressources (aligné sur les services actifs)
-  #   logging: *default-logging
-  #   security_opt: [no-new-privileges:true]
-  #   cap_drop: [ALL]
-  #   mem_limit: 256m
-  #   networks: [data] # joignable du moteur uniquement (http://llm-bridge:3031/v1)
+  # ── Pont LLM v2 — proxy multi-modèles en rotation (round-robin) ───────────
+  # Proxy OpenAI-compatible : découvre dynamiquement les modèles réellement
+  # disponibles de chaque upstream (sonde 1 token), les met en rotation « à
+  # tours de rôle » (aucun quota de modèle ne s'épuise isolément) et applique
+  # un failover cooldown exponentiel (402/403/429/5xx → modèle écarté, la
+  # requête est rejouée sur le suivant). Re-découverte périodique (15 min).
+  # Upstreams via AF_UPSTREAMS (nom|base|clé|role;… — voir .env.example du
+  # pont : mini-services/llm-bridge/.env.example).
+  #
+  # Accès : publication RESTREINTE à la passerelle docker0 (172.17.0.1) —
+  # joignable depuis le moteur ET depuis les sandboxes Kali de Phantom/Basalt
+  # (bridge par défaut → http://172.17.0.1:3031/v1), JAMAIS depuis Internet
+  # (ni 0.0.0.0, ni réseau externe ; auth Bearer LLM_BRIDGE_KEY en sus).
+  # Egress Internet : réseau dédié `llm` (le réseau `data` est internal).
+  llm-bridge:
+    build:
+      context: .
+      dockerfile: Dockerfile.bridge
+    environment:
+      LLM_BRIDGE_KEY: ${LLM_BRIDGE_KEY:-}
+      AF_UPSTREAMS: ${AF_UPSTREAMS:-}
+      AF_STATIC_MODELS: ${AF_STATIC_MODELS:-}
+      AF_REFRESH_MS: ${AF_REFRESH_MS:-900000}
+      AF_ATTEMPTS: ${AF_ATTEMPTS:-5}
+      BIND_HOST: 0.0.0.0
+    ports:
+      # Passerelle docker0 UNIQUEMENT : moteur + sandboxes locaux. Jamais 0.0.0.0.
+      - "172.17.0.1:3031:3031"
+    restart: unless-stopped
+    # ── P2 : confinement & ressources (aligné sur les services actifs) ──
+    logging: *default-logging
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    mem_limit: ${BRIDGE_MEM_LIMIT:-256m}
+    cpus: "0.5"
+    pids_limit: 256
+    healthcheck:
+      test: ["CMD", "bun", "-e", "const r = await fetch('http://127.0.0.1:3031/health'); process.exit(r.ok ? 0 : 1)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    networks: [data, llm]
+    # data  : joignable du moteur (DNS llm-bridge) ; llm : egress MaaS/router.
 
   # ── Reverse proxy : unique point d'entrée (80/443) ────────────────────────
   caddy:
@@ -279,6 +307,9 @@ volumes:
 #               externe.
 # docker-ctrl : moteur ⇄ docker-proxy — plan de contrôle Docker isolé ; le
 #               proxy n'est joignable d'AUCUN autre service.
+# llm         : egress Internet pour llm-bridge uniquement (upstreams LLM) —
+#               `data` étant internal, le pont a besoin d'une route sortante
+#               dédiée ; aucun autre service n'y est attaché.
 networks:
   edge:
     driver: bridge
@@ -286,3 +317,5 @@ networks:
     internal: true
   docker-ctrl:
     internal: true
+  llm:
+    driver: bridge # egress Internet (sondes + complétions vers les upstreams LLM)

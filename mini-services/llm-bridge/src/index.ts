@@ -1,72 +1,108 @@
 /**
- * AuditForge — Pont LLM OpenAI-compatible (Z.ai)
- * ================================================
- * Expose un endpoint /v1/chat/completions conforme à l'API OpenAI, adossé au
- * SDK z-ai-web-dev-sdk (backend uniquement). Destiné aux outils d'audit réels
- * (Phantom via LiteLLM, Basalt via son provider `openai_compat`) qui parlent
- * le protocole OpenAI.
+ * AuditForge — Pont LLM OpenAI-compatible v2 (proxy multi-modèles rotatif)
+ * =========================================================================
+ * Expose /v1/chat/completions (protocole OpenAI) et répartit les requêtes,
+ * à tours de rôle (round-robin), sur TOUS les modèles réellement disponibles
+ * de ses upstreams — plus aucun quota de modèle ne s'épuise isolément.
+ *
+ * Principe : le pont est un PROXY TRANSPARENT. Le corps de la requête
+ * (messages, tools, temperature, stream…) est transmis tel quel à l'upstream
+ * choisi, seul le champ `model` est réécrit. Les réponses sont relayées en
+ * flux (SSE réel quand stream:true) ou en JSON. En cas d'échec d'un modèle
+ * (quota, rate-limit, 5xx, timeout), il passe en cooldown exponentiel et la
+ * requête est rejouée immédiatement sur le modèle suivant du pool.
  *
  * Endpoints :
- *   GET  /v1/models            → liste des modèles exposés
- *   POST /v1/chat/completions  → complétion (stream SSE émulé si stream:true)
- *   GET  /health               → {ok:true}
+ *   GET  /health                → {ok, pool:{healthy,total}} (sans auth)
+ *   GET  /v1/models             → modèles du pool (+ alias auditforge-auto)
+ *   POST /v1/chat/completions   → complétion avec rotation + failover
+ *   GET  /v1/pool               → état détaillé du pool (ops)
+ *   POST /v1/pool/refresh       → force une re-découverte
  *
- * Auth : si LLM_BRIDGE_KEY est défini, l'en-tête `Authorization: Bearer <key>`
- * est exigé. Sinon, endpoint ouvert (réseau interne uniquement).
+ * Auth : si LLM_BRIDGE_KEY est défini, `Authorization: Bearer <key>` est
+ * exigé (comparaison à temps constant). Sinon endpoint ouvert (réseau
+ * interne uniquement).
  *
- * Port : 3031 (codé en dur, conventions du projet AuditForge).
+ * Configuration :
+ *   AF_UPSTREAMS      nom|base|clé|role;nom2|base2|clé2|role2  (role: primary|fallback)
+ *   AF_STATIC_MODELS  liste de secours (virgules) ajoutée comme « unverified »
+ *   AF_REFRESH_MS     période de re-découverte (défaut 15 min)
+ *   AF_ATTEMPTS       tentatives max par requête (défaut 5)
+ *   LLM_BRIDGE_KEY    clé Bearer exigée des clients (défaut : ouverte)
+ *
+ * Port : 3031 (convention AuditForge). Bind : BIND_HOST (0.0.0.0 en Docker).
  */
 
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { timingSafeEqual } from "node:crypto";
+import {
+  ModelPool,
+  classifyFailure,
+  normalizePreferred,
+  parseUpstreams,
+  type PickResult,
+} from "./pool";
+
+// ── Configuration ────────────────────────────────────────────────────────────
 
 const PORT = 3031;
+const BIND_HOST = process.env.BIND_HOST ?? "127.0.0.1";
 const BRIDGE_KEY = process.env.LLM_BRIDGE_KEY ?? "";
-const DEFAULT_MODEL = process.env.LLM_BRIDGE_MODEL ?? "glm-4.6";
-const EXPOSED_MODELS = (process.env.LLM_BRIDGE_MODELS ?? "glm-4.6,glm-4.5-air,glm-4.5-flash")
+const REFRESH_MS = clampInt(process.env.AF_REFRESH_MS, 60_000, 6 * 3_600_000, 900_000);
+const ATTEMPTS = clampInt(process.env.AF_ATTEMPTS, 1, 10, 5);
+const PROBE_TIMEOUT_MS = clampInt(process.env.AF_PROBE_TIMEOUT_MS, 5_000, 120_000, 30_000);
+/** Délai avant premiers octets de l'upstream (grands prompts → raisonnement long). */
+const TTFB_TIMEOUT_MS = clampInt(process.env.AF_TTFB_TIMEOUT_MS, 10_000, 900_000, 180_000);
+/** Silence maximal en flux (reset à chaque chunk). */
+const IDLE_TIMEOUT_MS = clampInt(process.env.AF_IDLE_TIMEOUT_MS, 10_000, 3_600_000, 600_000);
+
+/** Spécialisés (OCR/vision-lone/traduction) exclus de la rotation agentique. */
+const DISCOVERY_EXCLUDE =
+  /realtime|audio|asr|tts|s2s|livetranslate|tingwu|image|z-image|wan\d|embedding|omni|mock|(^|[-/.])(vl|ocr)([-.]|$)|(^|[-.])mt[-.]|character/i;
+
+const UPSTREAMS = parseUpstreams(process.env.AF_UPSTREAMS ?? "");
+const STATIC_MODELS = (process.env.AF_STATIC_MODELS ?? "")
   .split(",")
   .map((m) => m.trim())
   .filter(Boolean);
 
-// ── SDK Z.ai (instance unique, réutilisée entre les requêtes) ────────────────
-type ZAICompletion = {
-  choices?: Array<{ message?: { content?: unknown }; finish_reason?: string | null }>;
-  content?: unknown;
-  usage?: unknown;
-};
-type ZAIClient = {
-  chat: { completions: { create: (body: Record<string, unknown>) => Promise<ZAICompletion> } };
-};
-let zaiPromise: Promise<ZAIClient> | null = null;
-
-async function getZai(): Promise<ZAIClient> {
-  if (!zaiPromise) {
-    zaiPromise = import("z-ai-web-dev-sdk")
-      .then((mod) => {
-        const ZAI = (mod as { default?: unknown }).default ?? mod;
-        return (ZAI as { create: () => Promise<ZAIClient> }).create();
-      })
-      .catch((err: unknown) => {
-        // m4 (audit 8-a) : ne PAS mettre en cache le rejet — sinon le pont
-        // reste brické jusqu'au redémarrage après une seule erreur SDK.
-        zaiPromise = null;
-        throw err;
-      });
-  }
-  return zaiPromise;
+if (UPSTREAMS.length === 0) {
+  console.error(
+    "[llm-bridge] AUCUN upstream configuré — renseignez AF_UPSTREAMS (nom|base|clé|role;…)",
+  );
 }
 
+const pool = new ModelPool(UPSTREAMS, {
+  probeTimeoutMs: PROBE_TIMEOUT_MS,
+  excludeRe: DISCOVERY_EXCLUDE,
+  logger: (m) => console.log(`[llm-bridge] ${m}`),
+});
+
+// Liste statique de secours : disponible IMMÉDIATEMENT au boot (avant la fin
+// de la découverte), en « unverified » — un premier échec la mettra en
+// cooldown, la découverte confirmera/écartera ensuite.
+const firstPrimary = UPSTREAMS.find((u) => u.role === "primary") ?? UPSTREAMS[0];
+if (firstPrimary) for (const m of STATIC_MODELS) pool.ensureEntry(firstPrimary.name, m);
+
 // ── Utilitaires HTTP ─────────────────────────────────────────────────────────
-function json(res: ServerResponse, status: number, body: unknown): void {
+
+function clampInt(v: string | undefined, min: number, max: number, def: number): number {
+  const n = Number.parseInt(v ?? "", 10);
+  if (!Number.isFinite(n)) return def;
+  return Math.min(max, Math.max(min, n));
+}
+
+function json(res: ServerResponse, status: number, body: unknown, extraHeaders?: Record<string, string>): void {
   const payload = JSON.stringify(body);
   res.writeHead(status, {
     "Content-Type": "application/json",
     "Content-Length": Buffer.byteLength(payload),
+    ...extraHeaders,
   });
   res.end(payload);
 }
 
-function readBody(req: IncomingMessage, maxBytes = 8 * 1024 * 1024): Promise<string> {
+function readBody(req: IncomingMessage, maxBytes = 32 * 1024 * 1024): Promise<string> {
   return new Promise((resolve, reject) => {
     let size = 0;
     const chunks: Buffer[] = [];
@@ -86,7 +122,6 @@ function readBody(req: IncomingMessage, maxBytes = 8 * 1024 * 1024): Promise<str
 
 function authorized(req: IncomingMessage): boolean {
   if (!BRIDGE_KEY) return true;
-  // m4 (audit 8-a) : comparaison à temps constant (anti timing-attack).
   const header = req.headers.authorization ?? "";
   const expected = `Bearer ${BRIDGE_KEY}`;
   const a = Buffer.from(header);
@@ -94,182 +129,239 @@ function authorized(req: IncomingMessage): boolean {
   return a.length === b.length && timingSafeEqual(a, b);
 }
 
-// ── Mapping OpenAI → SDK → OpenAI ────────────────────────────────────────────
-interface OpenAIMessage {
-  role: "system" | "user" | "assistant";
-  content: unknown;
-}
-
-/** Convertit un contenu OpenAI (string ou tableau de parties) en string. */
-function flattenContent(content: unknown): string {
-  if (typeof content === "string") return content;
-  if (Array.isArray(content)) {
-    return content
-      .map((part) => {
-        if (typeof part === "string") return part;
-        if (part && typeof part === "object" && "text" in part) {
-          return String((part as { text?: unknown }).text ?? "");
-        }
-        return "";
-      })
-      .join("\n");
-  }
-  if (content == null) return "";
-  return String(content);
-}
-
-function toSdkMessages(messages: unknown): Array<{ role: string; content: string }> {
-  if (!Array.isArray(messages)) return [];
-  return (messages as OpenAIMessage[])
-    .filter((m) => m && typeof m.role === "string")
-    .slice(0, 256) // garde-fou
-    .map((m) => ({ role: m.role, content: flattenContent(m.content) }));
-}
-
 function completionId(): string {
   return `chatcmpl-bridge-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
-function buildNonStreamResponse(model: string, content: string, usage: unknown): Record<string, unknown> {
-  return {
-    id: completionId(),
-    object: "chat.completion",
-    created: Math.floor(Date.now() / 1000),
-    model,
-    choices: [
-      {
-        index: 0,
-        message: { role: "assistant", content },
-        finish_reason: "stop",
-      },
-    ],
-    usage:
-      usage && typeof usage === "object"
-        ? usage
-        : {
-            prompt_tokens: 0,
-            completion_tokens: 0,
-            total_tokens: 0,
-          },
-  };
-}
+// ── Tentative upstream (proxy transparent) ───────────────────────────────────
 
-/** Écrit un flux SSE OpenAI valide en émulant les deltas à partir du contenu final. */
-function writeEmulatedStream(res: ServerResponse, model: string, content: string): void {
-  res.writeHead(200, {
-    "Content-Type": "text/event-stream; charset=utf-8",
-    "Cache-Control": "no-cache",
-    Connection: "keep-alive",
-  });
-  const id = completionId();
-  const created = Math.floor(Date.now() / 1000);
-  const send = (obj: unknown): void => {
-    res.write(`data: ${JSON.stringify(obj)}\n\n`);
-  };
-  send({
-    id,
-    object: "chat.completion.chunk",
-    created,
-    model,
-    choices: [{ index: 0, delta: { role: "assistant", content: "" }, finish_reason: null }],
-  });
-  // Découpage par tranches (~200 caractères) pour un rendu fluide côté client.
-  const CHUNK = 200;
-  for (let i = 0; i < content.length; i += CHUNK) {
-    send({
-      id,
-      object: "chat.completion.chunk",
-      created,
-      model,
-      choices: [
-        { index: 0, delta: { content: content.slice(i, i + CHUNK) }, finish_reason: null },
-      ],
-    });
-  }
-  send({
-    id,
-    object: "chat.completion.chunk",
-    created,
-    model,
-    choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
-  });
-  res.write("data: [DONE]\n\n");
-  res.end();
-}
+type AttemptResult =
+  | { ok: true; status: number; json: Record<string, unknown>; latencyMs: number }
+  | { ok: false; status: number; errText: string; retriable: boolean; streamBroken?: boolean };
 
-// ── Routes ───────────────────────────────────────────────────────────────────
-async function handleChatCompletions(req: IncomingMessage, res: ServerResponse): Promise<void> {
-  let body: Record<string, unknown>;
-  try {
-    body = JSON.parse(await readBody(req));
-  } catch {
-    json(res, 400, {
-      error: { message: "Corps de requête JSON invalide", type: "invalid_request_error" },
-    });
-    return;
-  }
-
-  const messages = toSdkMessages(body.messages);
-  if (messages.length === 0) {
-    json(res, 400, {
-      error: { message: "`messages` est requis (tableau non vide)", type: "invalid_request_error" },
-    });
-    return;
-  }
-
-  const requestedModel = typeof body.model === "string" && body.model.trim() ? body.model.trim() : DEFAULT_MODEL;
-  // Modèle SDK : on transmet la demande telle quelle ; le SDK/la plateforme
-  // résout le modèle réel (glm-4.6 par défaut si inconnu).
-  const sdkModel = /^(glm|zhipu)/i.test(requestedModel) ? requestedModel : undefined;
-  const wantsStream = body.stream === true;
-
-  const payload: Record<string, unknown> = {
-    messages,
-    thinking: { type: "disabled" },
-  };
-  if (sdkModel) payload.model = sdkModel;
-  if (typeof body.temperature === "number") payload.temperature = body.temperature;
-  if (typeof body.max_tokens === "number") payload.max_tokens = body.max_tokens;
-
-  try {
-    const zai = await getZai();
-    const completion = await zai.chat.completions.create(payload);
-    const rawContent = completion?.choices?.[0]?.message?.content ?? completion?.content;
-    const content: string = typeof rawContent === "string" ? rawContent : "";
-    if (wantsStream) {
-      writeEmulatedStream(res, requestedModel, content);
-    } else {
-      json(res, 200, buildNonStreamResponse(requestedModel, content, completion?.usage));
+async function attemptUpstream(
+  c: PickResult,
+  parsed: Record<string, unknown>,
+  wantsStream: boolean,
+  clientRes: ServerResponse,
+  clientReq: IncomingMessage,
+): Promise<AttemptResult> {
+  const ctrl = new AbortController();
+  let ttfb: NodeJS.Timeout | null = setTimeout(
+    () => ctrl.abort(new DOMException("ttfb timeout", "TimeoutError")),
+    TTFB_TIMEOUT_MS,
+  );
+  let idle: NodeJS.Timeout | null = null;
+  const clearTimers = (): void => {
+    if (ttfb) {
+      clearTimeout(ttfb);
+      ttfb = null;
     }
+    if (idle) {
+      clearTimeout(idle);
+      idle = null;
+    }
+  };
+  const armIdle = (): void => {
+    if (idle) clearTimeout(idle);
+    idle = setTimeout(() => ctrl.abort(new DOMException("idle timeout", "TimeoutError")), IDLE_TIMEOUT_MS);
+  };
+  // Le client déconnecté → on coupe l'upstream immédiatement.
+  const onClientClose = (): void => ctrl.abort(new DOMException("client gone", "AbortError"));
+  clientRes.on("close", onClientClose);
+
+  const body = JSON.stringify({ ...parsed, model: c.model });
+  const t0 = Date.now();
+  try {
+    const res = await fetch(`${c.upstream.base}/chat/completions`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${c.upstream.key}`, "Content-Type": "application/json" },
+      body,
+      signal: ctrl.signal,
+    });
+
+    if (!res.ok) {
+      clearTimers();
+      const errText = (await res.text().catch(() => "")).slice(0, 8192);
+      const cls = classifyFailure(res.status);
+      if (cls.cooldown) pool.markFailure(c, res.status, errText.slice(0, 160));
+      else pool.markSoftFail(c, errText.slice(0, 160));
+      return { ok: false, status: res.status, errText, retriable: cls.retry };
+    }
+
+    // ── Succès ──
+    if (!wantsStream) {
+      const payload = (await res.json()) as Record<string, unknown>;
+      clearTimers();
+      const latency = Date.now() - t0;
+      pool.markSuccess(c, latency);
+      payload.model = c.model; // vérité : le modèle qui a réellement servi
+      return { ok: true, status: 200, json: payload, latencyMs: latency };
+    }
+
+    // Flux SSE : relais transparent. En-têtes reçus → premier octet imminent.
+    clearTimers();
+    clientRes.writeHead(200, {
+      "Content-Type": "text/event-stream; charset=utf-8",
+      "Cache-Control": "no-cache",
+      Connection: "keep-alive",
+      "X-Accel-Buffering": "no",
+      "X-Af-Served-By": c.model,
+    });
+    armIdle();
+    if (res.body) {
+      for await (const chunk of res.body as unknown as AsyncIterable<Uint8Array>) {
+        if (!clientRes.write(chunk)) {
+          // backpressure : attendre le drain sans geler la lecture amont
+          await new Promise<void>((r) => clientRes.once("drain", r));
+        }
+        armIdle();
+      }
+    }
+    clearTimers();
+    clientRes.end();
+    pool.markSuccess(c, Date.now() - t0);
+    return { ok: true, status: 200, json: {}, latencyMs: Date.now() - t0 };
   } catch (err) {
-    console.error("[llm-bridge] erreur complétion:", err);
-    json(res, 502, {
+    clearTimers();
+    const msg = err instanceof Error ? `${err.name}: ${err.message}` : "erreur réseau";
+    const headersSent = clientRes.headersSent;
+    if (!headersSent) {
+      pool.markFailure(c, 0, msg);
+      return { ok: false, status: 0, errText: msg, retriable: true };
+    }
+    // Le flux a cassé en pleine réponse : impossible de failover après
+    // émission des en-têtes — clôturer proprement (le client SSE verra EOF).
+    pool.markFailure(c, 0, `flux interrompu: ${msg}`);
+    try {
+      clientRes.end();
+    } catch {
+      /* déjà fermée */
+    }
+    return { ok: false, status: 0, errText: msg, retriable: false, streamBroken: true };
+  } finally {
+    clientRes.off("close", onClientClose);
+  }
+}
+
+// ── Route : chat completions (rotation + failover) ───────────────────────────
+
+async function handleChatCompletions(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = JSON.parse(await readBody(req)) as Record<string, unknown>;
+  } catch {
+    json(res, 400, { error: { message: "Corps de requête JSON invalide", type: "invalid_request_error" } });
+    return;
+  }
+  if (!Array.isArray(parsed.messages) || parsed.messages.length === 0) {
+    json(res, 400, { error: { message: "`messages` est requis (tableau non vide)", type: "invalid_request_error" } });
+    return;
+  }
+
+  const wantsStream = parsed.stream === true;
+  const preferred = normalizePreferred(parsed.model);
+  const candidates = pool.candidatesFor(preferred).slice(0, ATTEMPTS);
+
+  if (candidates.length === 0) {
+    json(res, 503, {
       error: {
-        message: "Échec de la complétion en amont (Z.ai)",
-        type: "upstream_error",
+        message: "Aucun modèle disponible dans le pool (découverte en cours ou tous en cooldown) — réessayez",
+        type: "pool_exhausted",
+        retry_after_s: 30,
       },
     });
+    return;
   }
+
+  let last: AttemptResult | null = null;
+  for (const c of candidates) {
+    const r = await attemptUpstream(c, parsed, wantsStream, res, req);
+    if (r.ok) {
+      if (wantsStream) return; // flux déjà relayé tel quel
+      console.log(
+        `[llm-bridge] 200 model=${String(parsed.model ?? "auto")} → ${c.model} ${r.latencyMs}ms`,
+      );
+      json(res, 200, r.json, { "X-Af-Served-By": c.model });
+      return;
+    }
+    last = r;
+    if (r.streamBroken) return; // réponse partielle déjà envoyée
+    if (!r.retriable) break;
+  }
+
+  const attempted = candidates.map((c) => `${c.upstream}/${c.model}`).join(", ");
+  console.error(`[llm-bridge] échec après ${candidates.length} tentative(s) [${attempted}]`);
+  const status = last && last.status >= 400 ? last.status : 502;
+  json(res, status, {
+    error: {
+      message: `Tous les modèles du pool ont échoué (tentatives : ${attempted})`,
+      type: "upstream_error",
+      detail: last?.errText?.slice(0, 600) ?? null,
+    },
+  });
+}
+
+// ── Routes annexes ───────────────────────────────────────────────────────────
+
+function handleModels(res: ServerResponse): void {
+  const data: Array<Record<string, unknown>> = [
+    {
+      id: "auditforge-auto",
+      object: "model",
+      created: 0,
+      owned_by: "auditforge-rotation",
+    },
+  ];
+  const seen = new Set<string>(["auditforge-auto"]);
+  for (const e of pool.snapshot().entries) {
+    if (e.state === "dead" || seen.has(e.model)) continue;
+    seen.add(e.model);
+    data.push({
+      id: e.model,
+      object: "model",
+      created: 0,
+      owned_by: `auditforge-pool:${e.upstream}`,
+    });
+  }
+  json(res, 200, { object: "list", data });
 }
 
 async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const url = (req.url ?? "/").split("?")[0];
 
   if (req.method === "GET" && (url === "/health" || url === "/")) {
-    json(res, 200, { ok: true, service: "auditforge-llm-bridge", models: EXPOSED_MODELS });
+    const snap = pool.snapshot();
+    json(res, 200, {
+      ok: true,
+      service: "auditforge-llm-bridge",
+      pool: { healthy: pool.healthyCount(), total: snap.entries.length },
+      upstreams: snap.upstreams.map((u) => ({ name: u.name, role: u.role, healthy: u.healthy })),
+    });
     return;
   }
 
   if (req.method === "GET" && (url === "/v1/models" || url === "/models")) {
-    json(res, 200, {
-      object: "list",
-      data: EXPOSED_MODELS.map((m) => ({
-        id: m,
-        object: "model",
-        created: 0,
-        owned_by: "auditforge-bridge",
-      })),
-    });
+    handleModels(res);
+    return;
+  }
+
+  if (req.method === "GET" && (url === "/v1/pool" || url === "/pool")) {
+    if (!authorized(req)) {
+      json(res, 401, { error: { message: "Non autorisé", type: "auth_error" } });
+      return;
+    }
+    json(res, 200, pool.snapshot());
+    return;
+  }
+
+  if (req.method === "POST" && (url === "/v1/pool/refresh" || url === "/pool/refresh")) {
+    if (!authorized(req)) {
+      json(res, 401, { error: { message: "Non autorisé", type: "auth_error" } });
+      return;
+    }
+    void pool.refresh().catch(() => undefined);
+    json(res, 202, { started: true });
     return;
   }
 
@@ -285,22 +377,33 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
   json(res, 404, { error: { message: "Route inconnue", type: "invalid_request_error" } });
 }
 
-// ── Serveur (bouclage uniquement, comme le moteur — jamais publié sur l'hôte) ─
-// m3 (audit 8-a) : BIND_HOST permet le déploiement Docker (0.0.0.0 — réseau
-// interne compose uniquement, jamais de port publié sur l'hôte).
-const BIND_HOST = process.env.BIND_HOST ?? "127.0.0.1";
+// ── Serveur ──────────────────────────────────────────────────────────────────
+
 const server = createServer((req, res) => {
   route(req, res).catch((err) => {
     console.error("[llm-bridge] erreur route:", err);
     if (!res.headersSent) json(res, 500, { error: { message: "Erreur interne", type: "internal_error" } });
   });
 });
+// Keep-alive des clients LiteLLM/agents : éviter les resets précoces.
+server.keepAliveTimeout = 75_000;
+server.headersTimeout = 240_000;
+server.requestTimeout = 0; // les complétions d'agent peuvent durer des minutes
 
 server.listen(PORT, BIND_HOST, () => {
-  console.log(`[llm-bridge] écoute sur ${BIND_HOST}:${PORT} (modèle par défaut: ${DEFAULT_MODEL})`);
+  console.log(`[llm-bridge] v2 écoute sur ${BIND_HOST}:${PORT}`);
+  console.log(`[llm-bridge] upstreams : ${UPSTREAMS.map((u) => `${u.name}(${u.role})`).join(", ") || "AUCUN"}`);
   if (!BRIDGE_KEY) {
     console.warn("[llm-bridge] LLM_BRIDGE_KEY absent — endpoint sans authentification (réseau interne uniquement)");
   }
+  // Découverte initiale en arrière-plan ; AF_STATIC_MODELS couvre les
+  // premières secondes (entrées « unverified » optimistes).
+  void pool
+    .discover()
+    .catch((err) => console.error("[llm-bridge] découverte initiale échouée:", err));
+  setInterval(() => {
+    void pool.refresh().catch(() => undefined);
+  }, REFRESH_MS).unref();
 });
 
 // ── Arrêt gracieux ───────────────────────────────────────────────────────────

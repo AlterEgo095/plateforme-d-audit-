@@ -684,7 +684,11 @@ const niktoSpec: ArsenalSpec = {
     for (const r of rows) {
       const vulns = Array.isArray(r.vulnerabilities) ? (r.vulnerabilities as Record<string, unknown>[]) : [];
       for (const v of vulns) {
-        const msg = String(v.msg ?? v.namelink ?? "").trim();
+        // nikto (perl) déréférence parfois un tableau dans son propre JSON —
+        // artefact « ARRAY(0x…) » à nettoyer du titre/preuve.
+        const clean = (s: unknown): string =>
+          String(s ?? "").replace(/ARRAY\(0x[0-9a-fA-F]+\)/g, "").trim();
+        const msg = clean(v.msg ?? v.namelink);
         if (!msg) continue;
         const url = String(v.url ?? "").trim();
         const low = msg.toLowerCase();
@@ -704,7 +708,7 @@ const niktoSpec: ArsenalSpec = {
           location: url || undefined,
           description: `Nikto (OSVDB ${String(v.id ?? "?")}) : ${msg}`,
           evidence: evidenceBlock([
-            `${String(v.method ?? "GET")} ${url}`,
+            `${Array.isArray(v.method) ? v.method.join(",") : String(v.method ?? "GET")} ${url}`,
             typeof v.iplink === "string" && v.iplink !== url ? v.iplink : undefined,
           ]),
           sentinelTriggered: false,

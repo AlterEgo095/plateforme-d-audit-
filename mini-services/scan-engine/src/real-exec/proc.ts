@@ -8,7 +8,7 @@
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
-import { existsSync } from "node:fs";
+import { closeSync, existsSync, openSync, readFileSync, rmSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -33,36 +33,63 @@ export async function probeVersion(
 ): Promise<string | null> {
   const resolved = which(bin);
   if (!resolved) return null;
-  return new Promise((resolve) => {
-    let child: ChildProcess;
+  // Bun ≥ 1.3 : pour un processus qui se termine en < ~100 ms (les outils Go
+  // rapides — subfinder/httpx/nuclei/amass/ffuf), les événements « data » du
+  // pipe stdout peuvent arriver APRÈS « close » (course stdio de
+  // child_process) et même spawnSync lit son pipe via la boucle d'événements.
+  // La sonde ressortait alors null → « binaire introuvable » alors qu'il est
+  // présent. Capture DÉTERMINISTE : stdout/stderr sont redirigés vers un
+  // fichier (écriture synchrone côté enfant), lu après « close ».
+  const outPath = join(tmpdir(), `af-probe-${process.pid}-${Date.now()}.log`);
+  let fd: number | null = null;
+  try {
+    fd = openSync(outPath, "w");
+    await new Promise<void>((resolve) => {
+      let child: ChildProcess;
+      try {
+        child = spawn(resolved, args, { stdio: ["ignore", fd as number, fd as number] });
+      } catch {
+        resolve();
+        return;
+      }
+      const timer = setTimeout(() => {
+        try {
+          child.kill("SIGKILL");
+        } catch {
+          /* déjà terminé */
+        }
+        resolve();
+      }, timeoutMs);
+      child.on("error", () => {
+        clearTimeout(timer);
+        resolve();
+      });
+      child.on("close", () => {
+        clearTimeout(timer);
+        resolve();
+      });
+    });
+    const out = existsSync(outPath) ? readFileSync(outPath, "utf8") : "";
+    // Première ligne NON VIDE (rich/Typer pad la sortie d'un retour à la ligne initial).
+    const firstLine = out
+      .split("\n")
+      .map((l) => l.trim())
+      .find((l) => l.length > 0);
+    return firstLine ?? null;
+  } catch {
+    return null;
+  } finally {
     try {
-      child = spawn(resolved, args, { stdio: ["ignore", "pipe", "pipe"] });
+      if (fd !== null) closeSync(fd);
     } catch {
-      resolve(null);
-      return;
+      /* */
     }
-    let out = "";
-    const timer = setTimeout(() => {
-      child.kill("SIGKILL");
-      resolve(null);
-    }, timeoutMs);
-    child.stdout?.on("data", (d: Buffer) => {
-      out += d.toString("utf8");
-    });
-    child.on("error", () => {
-      clearTimeout(timer);
-      resolve(null);
-    });
-    child.on("close", () => {
-      clearTimeout(timer);
-      // Première ligne NON VIDE (rich/Typer pad la sortie d'un retour à la ligne initial).
-      const firstLine = out
-        .split("\n")
-        .map((l) => l.trim())
-        .find((l) => l.length > 0);
-      resolve(firstLine ?? null);
-    });
-  });
+    try {
+      rmSync(outPath, { force: true });
+    } catch {
+      /* */
+    }
+  }
 }
 
 export interface RunStreamingOptions {

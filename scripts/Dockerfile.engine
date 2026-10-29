@@ -144,10 +144,14 @@ RUN if [ "$WITH_ARSENAL" = "1" ]; then set -eux; \
 
 # Wordlist ffuf (seclists) — incluse avec WITH_ARSENAL ; chemin surchargeable
 # par FFUF_WORDLIST (défaut du moteur : /usr/share/seclists/Discovery/Web-Content/common.txt).
+# NB : le paquet Debian « seclists » a disparu de trixie — on clone le dépôt
+# amont (même arborescence /usr/share/seclists) et on vérifie le fichier
+# attendu par le moteur au boot du build.
 ARG WITH_SECLISTS=0
 RUN if [ "$WITH_SECLISTS" = "1" ]; then set -eux; \
-      apt-get update -y && apt-get install -y --no-install-recommends seclists \
-      && rm -rf /var/lib/apt/lists/*; \
+      git clone --depth 1 https://github.com/danielmiessler/SecLists.git /usr/share/seclists \
+      && test -f /usr/share/seclists/Discovery/Web-Content/common.txt \
+      && rm -rf /usr/share/seclists/.git; \
     fi
 
 # Bun (binaire autonome) + code du moteur (client Prisma généré inclus).

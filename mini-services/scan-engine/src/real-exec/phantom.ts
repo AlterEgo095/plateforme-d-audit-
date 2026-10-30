@@ -133,50 +133,92 @@ function mapRunDirConfidence(raw: string): RealFinding["confidence"] {
 }
 
 function findingsFromRunDir(workdir: string): RealFinding[] {
+  const fromCsv = (runDir: string): RealFinding[] => {
+    const csvPath = join(runDir, "vulnerabilities.csv");
+    if (!existsSync(csvPath)) return [];
+    const lines = readFileSync(csvPath, "utf8")
+      .split(/\r?\n/)
+      .filter((l) => l.trim());
+    if (lines.length < 2) return [];
+    const header = splitCsvLine(lines[0]).map((h) => h.trim());
+    const out: RealFinding[] = [];
+    for (const line of lines.slice(1)) {
+      const cells = splitCsvLine(line);
+      const row: Record<string, string> = {};
+      header.forEach((h, i) => {
+        row[h] = (cells[i] ?? "").trim();
+      });
+      const mdPath = row.file ? join(runDir, row.file) : "";
+      const md = mdPath && existsSync(mdPath) ? readFileSync(mdPath, "utf8") : "";
+      const confidence = mapRunDirConfidence(row.confidence);
+      const cvssTxt = row.cvss || mdMeta(md, "CVSS");
+      const cvss = cvssTxt ? Number.parseFloat(cvssTxt) : NaN;
+      const locBits = [row.method, `${row.target ?? ""}${row.endpoint ?? ""}`].filter(Boolean);
+      const param = row.parameter ? ` (paramètre : ${row.parameter})` : "";
+      const description =
+        [mdSection(md, "Description"), mdSection(md, "Impact")].filter(Boolean).join("\n\n") ||
+        "(description disponible dans le rapport markdown du run)";
+      out.push({
+        title: row.title || row.id || "Constat Phantom",
+        severity: mapSeverity(row.severity || mdMeta(md, "Severity")),
+        confidence,
+        category: mdMeta(md, "CWE") || "web",
+        cve: null,
+        cvss: Number.isFinite(cvss) ? cvss : null,
+        location: locBits.length ? locBits.join(" ") + param : undefined,
+        description,
+        evidence: mdSection(md, "Technical Analysis") || "(aucune preuve détaillée fournie par l'outil)",
+        poc: mdSection(md, "Proof of Concept") || undefined,
+        sentinelTriggered: confidence === "CONFIRMED",
+        remediation: mdSection(md, "Remediation") || mdSection(md, "Remédiation") || undefined,
+      });
+    }
+    return out;
+  };
+
+  // Repli ultime : phantom a écrit les rapports markdown individuels mais est
+  // mort avant le CSV (crash en fin de run) — reconstruire depuis les .md.
+  const fromMd = (runDir: string): RealFinding[] => {
+    const vulnDir = join(runDir, "vulnerabilities");
+    const dir = existsSync(vulnDir) ? vulnDir : runDir;
+    const mds = readdirSync(dir).filter((f) => f.endsWith(".md"));
+    const out: RealFinding[] = [];
+    for (const f of mds) {
+      try {
+        const md = readFileSync(join(dir, f), "utf8");
+        const title = mdSection(md, "Vulnerability") || mdMeta(md, "Title") || f.replace(/\.md$/, "");
+        if (!title) continue;
+        out.push({
+          title: title.slice(0, 200),
+          severity: mapSeverity(mdMeta(md, "Severity")),
+          confidence: mapRunDirConfidence(mdMeta(md, "Status") || "suspected"),
+          category: mdMeta(md, "CWE") || "web",
+          cve: null,
+          cvss: null,
+          location: mdMeta(md, "Target") || mdMeta(md, "URL") || undefined,
+          description:
+            [mdSection(md, "Description"), mdSection(md, "Impact")].filter(Boolean).join("\n\n") ||
+            "(description dans le rapport markdown du run)",
+          evidence: mdSection(md, "Technical Analysis") || "(aucune preuve détaillée fournie par l'outil)",
+          poc: mdSection(md, "Proof of Concept") || undefined,
+          sentinelTriggered: false,
+          remediation: mdSection(md, "Remediation") || mdSection(md, "Remédiation") || undefined,
+        });
+      } catch {
+        /* rapport illisible — suivant */
+      }
+    }
+    return out;
+  };
+
   try {
     const runsDir = join(workdir, "phantom_runs");
     if (!existsSync(runsDir)) return [];
     const findings: RealFinding[] = [];
     for (const run of readdirSync(runsDir)) {
       const runDir = join(runsDir, run);
-      const csvPath = join(runDir, "vulnerabilities.csv");
-      if (!existsSync(csvPath)) continue;
-      const lines = readFileSync(csvPath, "utf8")
-        .split(/\r?\n/)
-        .filter((l) => l.trim());
-      if (lines.length < 2) continue;
-      const header = splitCsvLine(lines[0]).map((h) => h.trim());
-      for (const line of lines.slice(1)) {
-        const cells = splitCsvLine(line);
-        const row: Record<string, string> = {};
-        header.forEach((h, i) => {
-          row[h] = (cells[i] ?? "").trim();
-        });
-        const mdPath = row.file ? join(runDir, row.file) : "";
-        const md = mdPath && existsSync(mdPath) ? readFileSync(mdPath, "utf8") : "";
-        const confidence = mapRunDirConfidence(row.confidence);
-        const cvssTxt = row.cvss || mdMeta(md, "CVSS");
-        const cvss = cvssTxt ? Number.parseFloat(cvssTxt) : NaN;
-        const locBits = [row.method, `${row.target ?? ""}${row.endpoint ?? ""}`].filter(Boolean);
-        const param = row.parameter ? ` (paramètre : ${row.parameter})` : "";
-        const description =
-          [mdSection(md, "Description"), mdSection(md, "Impact")].filter(Boolean).join("\n\n") ||
-          "(description disponible dans le rapport markdown du run)";
-        findings.push({
-          title: row.title || row.id || "Constat Phantom",
-          severity: mapSeverity(row.severity),
-          confidence,
-          category: mdMeta(md, "CWE") || "web",
-          cve: null,
-          cvss: Number.isFinite(cvss) ? cvss : null,
-          location: locBits.length ? locBits.join(" ") + param : undefined,
-          description,
-          evidence: mdSection(md, "Technical Analysis") || "(aucune preuve détaillée fournie par l'outil)",
-          poc: mdSection(md, "Proof of Concept") || undefined,
-          sentinelTriggered: confidence === "CONFIRMED",
-          remediation: mdSection(md, "Remediation") || mdSection(md, "Remédiation") || undefined,
-        });
-      }
+      findings.push(...fromCsv(runDir));
+      if (findings.length === 0) findings.push(...fromMd(runDir));
     }
     return findings;
   } catch {
@@ -393,10 +435,16 @@ export class PhantomAdapter implements RealToolAdapter {
           "phantom",
         );
       } else if (result.exitCode !== 0) {
-        // Diagnostic embarqué dans l'erreur : la queue de sortie réelle + l'état
-        // du répertoire de run. Les lignes TOOL peuvent avoir été perdues par le
-        // flush batch (contention SQLite) — l'erreur survit, elle, en base.
-        const tail = stdoutAll.trimEnd().slice(-600).replace(/\s+/g, " ");
+        // Diagnostic embarqué dans l'erreur : lignes d'erreur réelles de
+        // phantom (traceback/exception), queue de sortie, état du run-dir.
+        // Les lignes TOOL peuvent avoir été perdues par le flush batch
+        // (contention SQLite) — l'erreur survit, elle, en base.
+        const interesting = stdoutAll
+          .split("\n")
+          .filter((l) => /traceback|exception|critical|\berror\b|failed/i.test(l) && !/pydantic|UserWarning/i.test(l))
+          .slice(-3)
+          .map((l) => l.trim().slice(0, 200));
+        const tail = stdoutAll.trimEnd().slice(-800).replace(/\s+/g, " ");
         const runsDir = join(ctx.workdir, "phantom_runs");
         const runsList = existsSync(runsDir)
           ? readdirSync(runsDir).slice(0, 5).join(",") || "(vide)"
@@ -404,6 +452,7 @@ export class PhantomAdapter implements RealToolAdapter {
         throw new Error(
           `Phantom a terminé avec le code ${result.exitCode} et aucun constat exploitable ` +
             `(JSON final ${parsed ? "absent" : "illisible"}, phantom_runs: ${runsList})` +
+            `${interesting.length ? ` — erreurs : ${interesting.join(" | ")}` : ""}` +
             `${tail ? ` — sortie : …${tail}` : " — sortie vide"}`,
         );
       }

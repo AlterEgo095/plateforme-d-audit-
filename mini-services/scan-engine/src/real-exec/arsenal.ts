@@ -1291,8 +1291,11 @@ const sqlmapSpec: ArsenalSpec = {
       : ctx.profile === "DEEP" ? ["--level=5", "--risk=3", "--forms"]
       : ["--level=2", "--risk=2"];
     return {
+      // NB : pas de --no-banner — rejeté par le sqlmap installé
+      // (« no such option: --no-banner » → exit 2 immédiat, cf. scan
+      // cmvv49byb0039p401tbk2ltdv). -v 0 suffit à limiter la sortie.
       args: [
-        "-u", ctx.target, "--batch", "--threads=4", "-v", "0", "--no-banner",
+        "-u", ctx.target, "--batch", "--threads=4", "-v", "0",
         "--output-dir", join(ctx.workdir, "sqlmap-out"),
         ...lvl,
       ],

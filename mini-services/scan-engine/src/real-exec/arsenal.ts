@@ -323,8 +323,15 @@ export function makeArsenalAdapter(spec: ArsenalSpec): RealToolAdapter {
 
       // Tolérance : plusieurs outils sortent non-zéro sur des résultats partiels.
       if (findings.length === 0 && result.exitCode !== 0) {
+        // Diagnostic : embarquer la queue de sortie de l'outil dans l'erreur —
+        // les lignes TOOL peuvent avoir été perdues (flush SQLite sous charge).
+        const tail = stdout
+          .slice(-4)
+          .map((l) => l.slice(0, 120))
+          .join(" ⏎ ")
+          .slice(0, 400);
         throw new Error(
-          `${spec.tool} a terminé avec le code ${result.exitCode} sans constat exploitable (cible injoignable ?)`,
+          `${spec.tool} a terminé avec le code ${result.exitCode} sans constat exploitable (cible injoignable ?)${tail ? ` — sortie : ${tail}` : ""}`,
         );
       }
       await ctx.onLog(
@@ -1028,10 +1035,13 @@ const semgrepSpec: ArsenalSpec = {
       cmdLabel: `semgrep scan --config ${REAL_EXEC.semgrepConfig} --json -o semgrep.json ${dir.cloned ? "(dépôt cloné)" : dir.value}`,
     };
   },
-  async parse({ reportPath }) {
+  async parse({ reportPath, ctx }) {
     const raw = await readReport(reportPath);
     const rows = parseJsonOrJsonl(raw);
     const out: RealFinding[] = [];
+    // Semgrep émet les chemins tels que passés sur la CLI (absolus ici) —
+    // re-latériser sous la racine du dépôt cloné pour un emplacement lisible.
+    const repoRoot = join(ctx.workdir, "target-repo") + "/";
     for (const r of rows) {
       const results = Array.isArray(r.results) ? (r.results as Record<string, unknown>[]) : [];
       for (const res of results) {
@@ -1040,7 +1050,8 @@ const semgrepSpec: ArsenalSpec = {
         const checkId = String(res.check_id ?? "").trim();
         if (!checkId) continue;
         const start = (res.start ?? {}) as Record<string, unknown>;
-        const path = String(res.path ?? "").trim();
+        const absPath = String(res.path ?? "").trim();
+        const path = absPath.startsWith(repoRoot) ? absPath.slice(repoRoot.length) : absPath;
         const line = typeof start.line === "number" ? start.line : null;
         const sevMap: Record<string, RealFinding["severity"]> = {
           ERROR: "HIGH", WARNING: "MEDIUM", INFO: "LOW",

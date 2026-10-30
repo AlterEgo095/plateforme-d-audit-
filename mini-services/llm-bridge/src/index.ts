@@ -193,6 +193,13 @@ async function attemptUpstream(
       const cls = classifyFailure(res.status);
       if (cls.cooldown) pool.markFailure(c, res.status, errText.slice(0, 160));
       else pool.markSoftFail(c, errText.slice(0, 160));
+      // Journal corps d'erreur upstream : sans lui, un 400/403 amont est
+      // indistinguible d'un autre (« dernière erreur HTTP 400 » ne dit pas
+      // POURQUOI). 300 c. suffisent pour diagnostiquer (quota, contexte,
+      // champ refusé…) sans polluer les logs.
+      console.warn(
+        `[llm-bridge] échec amont ${c.upstream.name}/${c.model} HTTP ${res.status} — ${errText.replace(/\s+/g, " ").slice(0, 300)}`,
+      );
       return { ok: false, status: res.status, errText, retriable: cls.retry };
     }
 
@@ -283,14 +290,15 @@ async function handleChatCompletions(req: IncomingMessage, res: ServerResponse):
   // 1 à 2 balayages du pool ; le 2e, après POOL_WAIT_MS, laisse expirer les
   // cooldowns courts — c'est ce qui sauve les agents pendant les tempêtes
   // de 403 transitoires des upstreams gratuits.
+  // NOTE : un 400 amont n'interrompt PLUS le 2e balayage. Un 400 d'UN
+  // candidat (quota masqué, modèle capricieux, champ refusé par un seul
+  // fournisseur) ne préjuge pas des autres — et tuer l'agent litellm avec
+  // un BadRequestError (non retryable) est bien pire que 45 s d'attente.
   const rounds = POOL_WAIT_MS > 0 ? 2 : 1;
   let last: AttemptResult | null = null;
   let attemptsTotal = 0;
   for (let round = 0; round < rounds; round++) {
     if (round > 0) {
-      // Inutile d'attendre si l'échec vient de la requête elle-même (400 =
-      // refus « soft » par TOUS les modèles tentés — rejouer ne changera rien).
-      if (last && last.status === 400) break;
       console.warn(`[llm-bridge] pool à sec — nouvelle tentative après ${Math.round(POOL_WAIT_MS / 1000)}s de délai`);
       await new Promise((r) => setTimeout(r, POOL_WAIT_MS));
     }
@@ -316,21 +324,20 @@ async function handleChatCompletions(req: IncomingMessage, res: ServerResponse):
   console.error(
     `[llm-bridge] échec après ${attemptsTotal} tentative(s) — dernière erreur HTTP ${last?.status ?? "?"}`,
   );
-  // Épuisement du pool → TOUJOURS 429 (retryable) avec Retry-After. Relayer
-  // le statut upstream (400/403) ferait mourir les agents litellm (non
-  // retryable) au lieu d'attendre la fin des cooldowns.
+  // Épuisement du pool → TOUJOURS 429 (retryable) avec Retry-After, y compris
+  // quand la dernière erreur amont est un 400 : relayer ce 400 tuerait
+  // l'agent litellm (BadRequestError non retryable) au lieu de le faire
+  // patienter jusqu'à l'expiration des cooldowns. Le corps amont reste
+  // disponible pour l'ops via `detail` et les logs « échec amont ».
   const retryAfterS = 60;
-  json(res, last?.status === 400 ? 400 : 429, {
+  json(res, 429, {
     error: {
-      message:
-        last?.status === 400
-          ? "Requête refusée par tous les modèles tentés (erreur de requête, pas de quota)"
-          : `Tous les modèles du pool ont échoué — pool en cooldown, réessayez dans ${retryAfterS}s`,
-      type: last?.status === 400 ? "invalid_request_error" : "pool_exhausted",
-      detail: last?.errText?.slice(0, 600) ?? null,
+      message: `Tous les modèles du pool ont échoué — pool en cooldown, réessayez dans ${retryAfterS}s`,
+      type: "pool_exhausted",
+      detail: last?.errText?.replace(/\s+/g, " ").slice(0, 600) ?? null,
       retry_after_s: retryAfterS,
     },
-  }, last?.status === 400 ? undefined : { "Retry-After": String(retryAfterS) });
+  }, { "Retry-After": String(retryAfterS) });
 }
 
 // ── Routes annexes ───────────────────────────────────────────────────────────

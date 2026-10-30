@@ -58,20 +58,36 @@ function mapSeverity(raw: unknown): RealFinding["severity"] {
   return SEVERITIES.has(v) ? (v.toUpperCase() as RealFinding["severity"]) : "MEDIUM";
 }
 
-/** Génère le fichier de configuration Basalt pointant vers le LLM configuré. */
+/**
+ * Génère le fichier de configuration Basalt pointant vers le LLM configuré.
+ * Schéma basalt-scan 0.1.1 (validé par `basalt doctor` en conteneur) :
+ *  - la clé passe par RÉFÉRENCE d'env (`api_key_env`) — un `api_key` inline
+ *    est ignoré par openai_compat et fuit dans les erreurs de resolve() ;
+ *  - les rôles attendus sont recon / red_find / purple_verify / blue_patch /
+ *    grader (un layout `providers:`/red/purple… est silencieusement ignoré) ;
+ *  - lang ne supporte que en|es (fr serait normalisé en en).
+ */
 async function writeBasaltConfig(ctx: RealAdapterContext): Promise<string> {
   const model = process.env.BASALT_MODEL ?? "glm-4.6";
+  const base = REAL_EXEC.llmApiBase.replace(/"/g, '\\"');
   const path = join(ctx.workdir, "basalt.yaml");
-  // YAML minimal généré à la main (dépendance yaml évitée)
+  const providerBlock = (indent: string): string[] => [
+    `${indent}- provider: openai_compat`,
+    `${indent}  model: ${model}`,
+    `${indent}  api_key_env: BASALT_LLM_KEY`,
+    `${indent}  base_url: "${base}"`,
+  ];
   const yaml = [
-    "lang: fr",
-    "providers:",
-    ...(["red", "purple", "blue", "grader"] as const).flatMap((role) => [
+    "lang: en",
+    "sandbox:",
+    "  driver: docker",
+    "default_providers:",
+    ...providerBlock("  "),
+    "roles:",
+    ...(["recon", "red_find", "purple_verify", "blue_patch", "grader"] as const).flatMap((role) => [
       `  ${role}:`,
-      `    - provider: openai_compat`,
-      `      model: ${model}`,
-      `      api_key: "${REAL_EXEC.llmApiKey.replace(/"/g, '\\"')}"`,
-      `      base_url: "${REAL_EXEC.llmApiBase.replace(/"/g, '\\"')}"`,
+      `    providers:`,
+      ...providerBlock("      "),
     ]),
   ].join("\n");
   await writeFile(path, yaml + "\n", "utf8");
@@ -136,20 +152,26 @@ export class BasaltAdapter implements RealToolAdapter {
 
     const result = await runStreaming({
       cmd: REAL_EXEC.basaltBin,
+      // basalt-scan 0.1.1 : le CLI ignore la variable d'env BASALT_CONFIG —
+      // la config se transmet par le flag `--config` ; `--fail-on` n'accepte
+      // pas « never » (info|low|medium|high|critical) → option retirée. La
+      // clé LLM passe via BASALT_LLM_KEY (référencée par api_key_env du YAML)
+      // car sanitizedEnv() ne forward pas LLM_API_KEY.
       args: [
         "audit",
         prepared.value,
+        "--config",
+        configPath,
         "--report",
         reportPath,
         "--format",
         "json",
-        "--fail-on",
-        "never",
       ],
       cwd: ctx.workdir,
       timeoutMs: REAL_EXEC.timeoutMinutes * 60_000,
       signal: ctx.signal,
       env: {
+        BASALT_LLM_KEY: REAL_EXEC.llmApiKey,
         BASALT_CONFIG: configPath,
         PYTHONUNBUFFERED: "1",
       },

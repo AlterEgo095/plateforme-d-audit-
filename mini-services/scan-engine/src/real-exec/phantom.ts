@@ -393,8 +393,18 @@ export class PhantomAdapter implements RealToolAdapter {
           "phantom",
         );
       } else if (result.exitCode !== 0) {
+        // Diagnostic embarqué dans l'erreur : la queue de sortie réelle + l'état
+        // du répertoire de run. Les lignes TOOL peuvent avoir été perdues par le
+        // flush batch (contention SQLite) — l'erreur survit, elle, en base.
+        const tail = stdoutAll.trimEnd().slice(-600).replace(/\s+/g, " ");
+        const runsDir = join(ctx.workdir, "phantom_runs");
+        const runsList = existsSync(runsDir)
+          ? readdirSync(runsDir).slice(0, 5).join(",") || "(vide)"
+          : "(absent)";
         throw new Error(
-          `Phantom a terminé avec le code ${result.exitCode} et aucun constat exploitable (JSON final illisible, répertoire de run sans vulnerabilities.csv)`,
+          `Phantom a terminé avec le code ${result.exitCode} et aucun constat exploitable ` +
+            `(JSON final ${parsed ? "absent" : "illisible"}, phantom_runs: ${runsList})` +
+            `${tail ? ` — sortie : …${tail}` : " — sortie vide"}`,
         );
       }
     }

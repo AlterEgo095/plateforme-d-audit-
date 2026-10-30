@@ -55,6 +55,13 @@ const PROBE_TIMEOUT_MS = clampInt(process.env.AF_PROBE_TIMEOUT_MS, 5_000, 120_00
 const TTFB_TIMEOUT_MS = clampInt(process.env.AF_TTFB_TIMEOUT_MS, 10_000, 900_000, 180_000);
 /** Silence maximal en flux (reset à chaque chunk). */
 const IDLE_TIMEOUT_MS = clampInt(process.env.AF_IDLE_TIMEOUT_MS, 10_000, 3_600_000, 600_000);
+/**
+ * Tempête de cooldown : attente avant une 2e (et dernière) balayage du pool.
+ * 0 désactive. Les cooldowns de base (90 s) expirant vite, une attente unique
+ * de 45 s sauve un appel d'agent qui mourrait sinon d'un pool momentanément
+ * à sec (403 quota transitoires en rafale sur les upstreams gratuits).
+ */
+const POOL_WAIT_MS = clampInt(process.env.AF_POOL_WAIT_MS, 0, 300_000, 45_000);
 
 /** Spécialisés (OCR/vision-lone/traduction) exclus de la rotation agentique. */
 const DISCOVERY_EXCLUDE =
@@ -261,9 +268,8 @@ async function handleChatCompletions(req: IncomingMessage, res: ServerResponse):
 
   const wantsStream = parsed.stream === true;
   const preferred = normalizePreferred(parsed.model);
-  const candidates = pool.candidatesFor(preferred).slice(0, ATTEMPTS);
 
-  if (candidates.length === 0) {
+  if (pool.candidatesFor(preferred).length === 0) {
     json(res, 503, {
       error: {
         message: "Aucun modèle disponible dans le pool (découverte en cours ou tous en cooldown) — réessayez",
@@ -274,32 +280,57 @@ async function handleChatCompletions(req: IncomingMessage, res: ServerResponse):
     return;
   }
 
+  // 1 à 2 balayages du pool ; le 2e, après POOL_WAIT_MS, laisse expirer les
+  // cooldowns courts — c'est ce qui sauve les agents pendant les tempêtes
+  // de 403 transitoires des upstreams gratuits.
+  const rounds = POOL_WAIT_MS > 0 ? 2 : 1;
   let last: AttemptResult | null = null;
-  for (const c of candidates) {
-    const r = await attemptUpstream(c, parsed, wantsStream, res, req);
-    if (r.ok) {
-      if (wantsStream) return; // flux déjà relayé tel quel
-      console.log(
-        `[llm-bridge] 200 model=${String(parsed.model ?? "auto")} → ${c.model} ${r.latencyMs}ms`,
-      );
-      json(res, 200, r.json, { "X-Af-Served-By": c.model });
-      return;
+  let attemptsTotal = 0;
+  for (let round = 0; round < rounds; round++) {
+    if (round > 0) {
+      // Inutile d'attendre si l'échec vient de la requête elle-même (400 =
+      // refus « soft » par TOUS les modèles tentés — rejouer ne changera rien).
+      if (last && last.status === 400) break;
+      console.warn(`[llm-bridge] pool à sec — nouvelle tentative après ${Math.round(POOL_WAIT_MS / 1000)}s de délai`);
+      await new Promise((r) => setTimeout(r, POOL_WAIT_MS));
     }
-    last = r;
-    if (r.streamBroken) return; // réponse partielle déjà envoyée
-    if (!r.retriable) break;
+    const candidates = pool.candidatesFor(preferred).slice(0, ATTEMPTS);
+    for (const c of candidates) {
+      attemptsTotal += 1;
+      const r = await attemptUpstream(c, parsed, wantsStream, res, req);
+      if (r.ok) {
+        if (wantsStream) return; // flux déjà relayé tel quel
+        console.log(
+          `[llm-bridge] 200 model=${String(parsed.model ?? "auto")} → ${c.upstream.name}/${c.model} ${r.latencyMs}ms`,
+        );
+        json(res, 200, r.json, { "X-Af-Served-By": c.model });
+        return;
+      }
+      last = r;
+      if (r.streamBroken) return; // réponse partielle déjà envoyée
+      if (!r.retriable) break;
+    }
+    if (last && !last.retriable) break;
   }
 
-  const attempted = candidates.map((c) => `${c.upstream}/${c.model}`).join(", ");
-  console.error(`[llm-bridge] échec après ${candidates.length} tentative(s) [${attempted}]`);
-  const status = last && last.status >= 400 ? last.status : 502;
-  json(res, status, {
+  console.error(
+    `[llm-bridge] échec après ${attemptsTotal} tentative(s) — dernière erreur HTTP ${last?.status ?? "?"}`,
+  );
+  // Épuisement du pool → TOUJOURS 429 (retryable) avec Retry-After. Relayer
+  // le statut upstream (400/403) ferait mourir les agents litellm (non
+  // retryable) au lieu d'attendre la fin des cooldowns.
+  const retryAfterS = 60;
+  json(res, last?.status === 400 ? 400 : 429, {
     error: {
-      message: `Tous les modèles du pool ont échoué (tentatives : ${attempted})`,
-      type: "upstream_error",
+      message:
+        last?.status === 400
+          ? "Requête refusée par tous les modèles tentés (erreur de requête, pas de quota)"
+          : `Tous les modèles du pool ont échoué — pool en cooldown, réessayez dans ${retryAfterS}s`,
+      type: last?.status === 400 ? "invalid_request_error" : "pool_exhausted",
       detail: last?.errText?.slice(0, 600) ?? null,
+      retry_after_s: retryAfterS,
     },
-  });
+  }, last?.status === 400 ? undefined : { "Retry-After": String(retryAfterS) });
 }
 
 // ── Routes annexes ───────────────────────────────────────────────────────────

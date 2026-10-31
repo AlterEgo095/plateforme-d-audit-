@@ -134,6 +134,120 @@ const URL_TARGET_RE = /^https?:\/\/[^\s]+$/i
 const GIT_TARGET_RE = /^(https?:\/\/|ssh:\/\/|git@)[^\s]+$/i
 const NETWORK_TARGET_RE = /^[a-zA-Z0-9._:[\]/-]+$/
 
+// ─── Protection SSRF (F-04 — audit sécurité) ─────────────────────────
+//
+// Les cibles URL/NETWORK sont transmises aux outils du moteur, qui joignent
+// l'hôte depuis la sandbox. Sans garde sur l'hôte, un AUDITOR peut demander
+// le scan d'une cible interne (boucle, réseau privé, liaison, métadonnées
+// cloud) et obtenir un SSRF. Le contrôle porte sur l'hôte LITTÉRAL de la
+// cible ; la résolution DNS (nom public → IP privée) reste du ressort du
+// moteur, hors périmètre APP. Les cibles GIT ne sont pas concernées
+// (github.com etc. conservent leur comportement).
+
+/** Noms d'hôtes internes interdits (métadonnées cloud couvertes par .internal). */
+const FORBIDDEN_HOSTNAMES = new Set(['localhost', 'metadata.google.internal'])
+/** Suffixes internes : *.localhost, *.internal. */
+const FORBIDDEN_HOST_SUFFIXES = ['.localhost', '.internal']
+
+/** Parse une IPv4 pointée → 4 octets, ou null si ce n'est pas une IPv4 littérale. */
+function parseIPv4(host: string): [number, number, number, number] | null {
+  const parts = host.split('.')
+  if (parts.length !== 4) return null
+  const octets = parts.map((p) => (/^\d{1,3}$/.test(p) ? Number(p) : NaN))
+  if (octets.some((n) => Number.isNaN(n) || n > 255)) return null
+  return [octets[0] as number, octets[1] as number, octets[2] as number, octets[3] as number]
+}
+
+/** Vrai si l'IPv4 est privée/boucle/liaison/réservée (0.0.0.0/8 inclus). */
+function isPrivateIPv4([a, b]: [number, number, number, number]): boolean {
+  if (a === 0) return true // 0.0.0.0/8 — « ce réseau »
+  if (a === 10) return true // 10.0.0.0/8 — privé
+  if (a === 127) return true // 127.0.0.0/8 — boucle
+  if (a === 169 && b === 254) return true // 169.254.0.0/16 — liaison (link-local)
+  if (a === 172 && b >= 16 && b <= 31) return true // 172.16.0.0/12 — privé
+  if (a === 192 && b === 168) return true // 192.168.0.0/16 — privé
+  return false
+}
+
+/** Développe une IPv6 littérale en 8 groupes numériques, ou null si invalide. */
+function ipv6Groups(host: string): number[] | null {
+  const halves = host.split('::')
+  if (halves.length > 2) return null
+  const head = halves[0] ? halves[0].split(':') : []
+  const tail = halves.length === 2 && halves[1] ? halves[1].split(':') : []
+  const missing = 8 - head.length - tail.length
+  if (halves.length === 2 && missing < 1) return null
+  const all = halves.length === 2 ? [...head, ...Array<string>(missing).fill('0'), ...tail] : head
+  if (all.length !== 8) return null
+  const groups = all.map((g) => (/^[0-9a-f]{1,4}$/.test(g) ? parseInt(g, 16) : NaN))
+  return groups.some((n) => Number.isNaN(n)) ? null : groups
+}
+
+/** Vrai si l'IPv6 est boucle/non spécifiée/privée/liaison (::1, fc00::/7, fe80::/10, ::). */
+function isPrivateIPv6(rawHost: string): boolean {
+  const host = rawHost.replace(/^\[|\]$/g, '').split('%')[0] as string // crochets + zone id
+  if (host === '::' || host === '::1') return true
+  if (host.startsWith('::ffff:')) {
+    // IPv4 mappée (::ffff:10.0.0.1) → réévaluée comme IPv4
+    const v4 = parseIPv4(host.slice(7))
+    return v4 ? isPrivateIPv4(v4) : true
+  }
+  const groups = ipv6Groups(host)
+  if (!groups) return false // pas une IPv6 littérale → traitée comme nom d'hôte
+  if (groups.every((g) => g === 0)) return true // :: (non spécifiée)
+  if (groups.slice(0, 7).every((g) => g === 0) && groups[7] === 1) return true // ::1 forme complète
+  const g0 = groups[0] as number
+  if ((g0 & 0xfe00) === 0xfc00) return true // fc00::/7 — unique local
+  if ((g0 & 0xffc0) === 0xfe80) return true // fe80::/10 — liaison
+  return false
+}
+
+/**
+ * F-04 (SSRF) : vrai si l'hôte est privé/interne — boucle, réseau privé,
+ * liaison, métadonnées cloud, localhost. Exporté pour réutilisation.
+ */
+export function isForbiddenTargetHost(rawHost: string): boolean {
+  const host = rawHost.trim().toLowerCase().replace(/\.$/, '') // FQDN sans point final
+  if (host.length === 0) return true
+  if (FORBIDDEN_HOSTNAMES.has(host) || FORBIDDEN_HOST_SUFFIXES.some((s) => host.endsWith(s))) {
+    return true
+  }
+  const v4 = parseIPv4(host)
+  if (v4) return isPrivateIPv4(v4)
+  if (host.includes(':')) return isPrivateIPv6(host)
+  return false
+}
+
+/** Hôte + port d'une cible URL (déjà validée par URL_TARGET_RE). */
+function extractUrlHostPort(target: string): { host: string; port: string | null } {
+  try {
+    const u = new URL(target)
+    return { host: u.hostname, port: u.port || null }
+  } catch {
+    // Injoignable ici (format déjà refusé) — hôte vide non significatif.
+    return { host: '', port: null }
+  }
+}
+
+/**
+ * Hôte + port d'une cible NETWORK (formats tolérés : hôte, hôte:port,
+ * hôte/chemin, CIDR, [IPv6], [IPv6]:port).
+ */
+function extractNetworkHostPort(target: string): { host: string; port: string | null } {
+  const addr = (target.split('/')[0] ?? target).trim() // CIDR → adresse de base
+  if (addr.startsWith('[')) {
+    const end = addr.indexOf(']')
+    const host = end === -1 ? addr.slice(1) : addr.slice(1, end)
+    const after = end === -1 ? '' : addr.slice(end + 1)
+    return { host, port: after.startsWith(':') ? after.slice(1) : null }
+  }
+  const colon = addr.indexOf(':')
+  if (colon === -1) return { host: addr, port: null }
+  const rest = addr.slice(colon + 1)
+  if (/^\d+$/.test(rest)) return { host: addr.slice(0, colon), port: rest } // hôte:port
+  return { host: addr, port: null } // IPv6 nue (plusieurs ':')
+}
+
 /**
  * Valide une cible selon son type. Retourne un message d'erreur FR, ou null si
  * la cible est acceptée.
@@ -157,6 +271,18 @@ export function validateTarget(targetType: TargetType, target: string): string |
   }
   if (targetType === 'NETWORK' && !NETWORK_TARGET_RE.test(t)) {
     return 'Cible réseau invalide — caractères autorisés : alphanumériques, . : / [ ] -'
+  }
+  // F-04 : après le format, l'hôte des cibles URL/NETWORK est confronté à la
+  // liste noire privée/interne (les cibles GIT gardent leur comportement).
+  if (targetType === 'URL' || targetType === 'NETWORK') {
+    const { host, port } =
+      targetType === 'URL' ? extractUrlHostPort(t) : extractNetworkHostPort(t)
+    if (host && isForbiddenTargetHost(host)) {
+      return 'Cible interdite : hôtes privés/internes non autorisés (protection SSRF)'
+    }
+    if (port === '0') {
+      return 'Cible interdite : port 0 non autorisé'
+    }
   }
   return null
 }

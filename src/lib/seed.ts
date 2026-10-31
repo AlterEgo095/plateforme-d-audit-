@@ -310,7 +310,10 @@ async function runSeed(): Promise<void> {
     if (demoSeedEnabled()) {
       await db.user.createMany({
         data: [
-          { username: 'admin', passwordHash: hashPassword('Admin123!'), role: 'ADMIN', mfaEnabled: true },
+          // F-05 : le TOTP de démonstration (code « 123456 ») a été supprimé.
+          // Sans champ totpSecret ni enrôlement, mfaEnabled=true verrouillerait
+          // le compte admin (403 « MFA activé mais non configuré »).
+          { username: 'admin', passwordHash: hashPassword('Admin123!'), role: 'ADMIN', mfaEnabled: false },
           { username: 'auditeur', passwordHash: hashPassword('Audit123!'), role: 'AUDITOR', mfaEnabled: false },
           { username: 'observateur', passwordHash: hashPassword('View123!'), role: 'VIEWER', mfaEnabled: false },
         ],

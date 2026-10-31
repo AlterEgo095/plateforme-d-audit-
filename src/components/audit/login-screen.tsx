@@ -188,10 +188,6 @@ export function LoginScreen({ onLogin }: { onLogin: (user: UserDTO) => void }) {
                 </InputOTP>
               </div>
 
-              <p className="text-muted-foreground text-center text-xs">
-                Code TOTP de démonstration : <span className="text-foreground font-mono font-semibold">123456</span>
-              </p>
-
               <Button
                 type="submit"
                 className="h-11 w-full"

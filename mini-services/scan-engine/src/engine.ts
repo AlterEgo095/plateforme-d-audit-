@@ -36,6 +36,7 @@ import { currentExecMode, getRealAdapter } from "./real-exec/index";
 import { REAL_EXEC } from "./real-exec/env";
 import { makeWorkdir, removeWorkdir } from "./real-exec/proc";
 import { probeUrlTarget } from "./real-exec/arsenal";
+import { assertRemoteTargetAllowed } from "./target-guard";
 import type { RealFinding, RealToolAdapter } from "./real-exec/types";
 // Import de TYPE uniquement (aucun cycle à l'exécution) — interface définie dans index.ts.
 import type { ServerToClientEvents } from "./index";
@@ -980,6 +981,22 @@ export class ScanEngine {
         `MODE RÉEL — ${cfg.tool} sera exécuté authentiquement (adaptateur réel, profil ${cfg.profile}).`,
       );
       await flushPending();
+
+      // F-04/F-11 (2-c) : garde SSRF côté moteur — l'API a déjà bloqué, mais
+      // re-vérifier ICI (immédiatement avant l'exécution) réduit la fenêtre
+      // TOCTOU et protège les scans re-dispatchés depuis la file (reprise).
+      // Résolution DNS incluse : une cible qui résout vers une plage privée/
+      // boucle/lien-local est refusée AVANT tout probe réseau.
+      if (cfg.targetType === "URL" || cfg.targetType === "NETWORK") {
+        const guard = await assertRemoteTargetAllowed(cfg.target);
+        if (!guard.ok) {
+          pushLog("ERROR", "systeme", `Cible refusée (protection SSRF) — ${guard.reason}`);
+          await flushPending();
+          throw new Error(
+            `Cible refusée par le garde SSRF du moteur — ${guard.reason}. ${cfg.tool} non exécuté.`,
+          );
+        }
+      }
 
       // Pré-vol (honnêteté des statuts) : une cible URL injoignable ne doit
       // ni produire un « COMPLETED — 0 constat » trompeur, ni laisser l'outil

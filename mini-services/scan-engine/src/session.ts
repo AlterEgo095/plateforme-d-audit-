@@ -11,7 +11,22 @@
 
 import { createHmac, timingSafeEqual } from "node:crypto";
 
-const SECRET = process.env.AUTH_SECRET ?? "auditforge-dev-secret-change-me";
+const DEV_SECRET = "auditforge-dev-secret-change-me";
+const rawSecret = process.env.AUTH_SECRET;
+
+// F-11 (remédiation 2-c, aligné sur src/lib/auth.ts) : en production, un
+// secret ABSENT ou laissé à sa valeur de développement est rédhibitoire —
+// échec AU BOOT (le moteur signe/vérifie les sessions socket.io et les
+// routes /internal avec ce secret ; un secret public = contournement total
+// de l'authentification). En développement, le fallback reste toléré (K.6).
+if (process.env.NODE_ENV === "production" && (!rawSecret || rawSecret === DEV_SECRET)) {
+  throw new Error(
+    "AUTH_SECRET requis en production (valeur absente ou identique au secret de développement " +
+      "'auditforge-dev-secret-change-me') — configurez AUTH_SECRET avant de démarrer le moteur.",
+  );
+}
+
+const SECRET = rawSecret ?? DEV_SECRET;
 
 const VALID_ROLES = ["ADMIN", "AUDITOR", "VIEWER"] as const;
 type ValidRole = (typeof VALID_ROLES)[number];
@@ -26,7 +41,7 @@ export interface EngineSession {
 }
 
 // K.6 : warning au boot si le secret de développement (fallback) est utilisé.
-if (!process.env.AUTH_SECRET) {
+if (!rawSecret) {
   console.warn(
     "[scan-engine] AUTH_SECRET manquant — secret de développement appliqué " +
       "('auditforge-dev-secret-change-me'). À configurer impérativement en production.",

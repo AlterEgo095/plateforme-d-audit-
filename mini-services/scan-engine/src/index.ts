@@ -20,6 +20,7 @@ import { reconcileStaleCampaigns } from "./campaign-finalize";
 import { startLogRetentionScheduler } from "./maintenance";
 import { ScanEngine, setIo } from "./engine";
 import { verifySessionToken } from "./session";
+import { assertRemoteTargetAllowed } from "./target-guard";
 import { currentExecMode, getRealAdapter } from "./real-exec/index";
 import type { EngineRunParams } from "./engine";
 import type {
@@ -287,6 +288,22 @@ async function route(req: IncomingMessage, res: ServerResponse, engine: ScanEngi
       if (targetError) {
         sendJson(res, 400, { ok: false, error: targetError });
         return;
+      }
+
+      // F-04/F-11 (2-c) : garde SSRF par résolution DNS — une cible URL/NETWORK
+      // qui pointe (littéralement ou via DNS) vers une adresse privée/boucle/
+      // lien-local est refusée AVANT toute exécution. Défense en profondeur :
+      // l'app a déjà un blocage équivalent, le moteur ne lui fait pas confiance.
+      // (Cibles GIT exemptées : clonage de dépôts, pas d'accès IP direct.)
+      if (targetType === "URL" || targetType === "NETWORK") {
+        const guard = await assertRemoteTargetAllowed(target);
+        if (!guard.ok) {
+          sendJson(res, 400, {
+            ok: false,
+            error: `cible refusée (protection SSRF) : ${guard.reason}`,
+          });
+          return;
+        }
       }
 
       // P4 : au-delà du plafond de scans simultanés, le scan est mis en file

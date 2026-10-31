@@ -3,10 +3,10 @@
 import sys
 import time
 import paramiko
+from vps_secrets import load_vps_secrets
 
-HOST = "95.111.226.63"
-USER = "aenews"
-PASSWORD = "REDACTED"
+# F-01 : identifiants hors du dépôt (env ou scripts/.secrets.local — échec clair sinon)
+HOST, USER, PASSWORD = load_vps_secrets()
 
 # (local, distant)
 FILES = [

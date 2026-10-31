@@ -5,10 +5,12 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from af_secrets import admin_credentials
 
 BASE, CID = sys.argv[1], sys.argv[2]
 DEADLINE = int(sys.argv[3]) if len(sys.argv) > 3 else 5400
-USER, PASS = "admin", "REDACTED-ROTATE-ME"
+# F-02 : identifiants admin hors du dépôt (env ou vps-tools/.env.local — échec clair sinon)
+USER, PASS = admin_credentials()
 COOKIE = {"v": None}
 
 

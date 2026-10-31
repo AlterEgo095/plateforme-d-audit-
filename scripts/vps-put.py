@@ -5,10 +5,10 @@ Usage: python3 vps-put.py <local1> <remote1> [<local2> <remote2> ...]
 import os
 import sys
 import paramiko
+from vps_secrets import load_vps_secrets
 
-HOST = "95.111.226.63"
-USER = "aenews"
-PASS = os.environ.get("VPS_PASS", "REDACTED")
+# F-02 : plus de mot de passe par défaut — env ou scripts/.secrets.local, échec clair sinon
+HOST, USER, PASS = load_vps_secrets()
 
 
 def main() -> int:

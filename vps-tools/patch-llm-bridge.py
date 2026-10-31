@@ -3,11 +3,39 @@
 Exécuter avec sudo depuis /opt/auditforge. Sauvegardes .bak-llm avant modifications.
 """
 import os, re, sys, subprocess, datetime
+from pathlib import Path
 
 ROOT = "/opt/auditforge"
 STAMP = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
 
-NEW_KEY = "REDACTED-KEY-ROTATE-ME"
+
+def _env_local(path):
+    """Parse minimaliste clé=valeur d'un .env.local non tracké."""
+    values = {}
+    try:
+        for line in Path(path).read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, _, v = line.partition("=")
+            values[k.strip()] = v.strip().strip('"').strip("'")
+    except OSError:
+        pass
+    return values
+
+
+# F-03 : clés LLM hors du dépôt — env (LLM_API_KEY / LLM_FALLBACK_KEY / AF_UPSTREAMS)
+# puis vps-tools/.env.local (non tracké). Échec CLAIR si la clé primaire absente.
+_ENV_LOCAL = _env_local(Path(__file__).resolve().parent / ".env.local")
+NEW_KEY = os.environ.get("LLM_API_KEY") or _ENV_LOCAL.get("LLM_API_KEY", "")
+FALLBACK_KEY = os.environ.get("LLM_FALLBACK_KEY") or _ENV_LOCAL.get("LLM_FALLBACK_KEY", "")
+UPSTREAMS = (os.environ.get("AF_UPSTREAMS")
+             or _ENV_LOCAL.get("AF_UPSTREAMS")
+             or (f"maas|https://dashscope-intl.aliyuncs.com/compatible-mode/v1|{NEW_KEY}|primary"
+                 + (f";router|https://api.anyrouter.dev/v1|{FALLBACK_KEY}|fallback" if FALLBACK_KEY else "")))
+if not NEW_KEY or not UPSTREAMS:
+    sys.exit("[secrets] LLM_API_KEY (et AF_UPSTREAMS si souhaité) manquant(s) — "
+             "définissez-les dans l'environnement ou dans vps-tools/.env.local (non tracké, chmod 600)")
 
 def sh(cmd):
     return subprocess.run(cmd, shell=True, capture_output=True, text=True).stdout.strip()
@@ -52,7 +80,7 @@ env_raw = set_var(env_raw, "LLM_API_BASE", "http://172.17.0.1:3031/v1", "# Endpo
 env_raw = set_var(env_raw, "PHANTOM_LLM", "openai/auditforge-auto", "# Alias de rotation → round-robin sur tout le pool")
 env_raw = set_var(env_raw, "PHANTOM_COMPRESSOR_LLM", "openai/auditforge-auto", "# Compresseur mémoire phantom → rotation")
 env_raw = set_var(env_raw, "BASALT_MODEL", "auditforge-auto", "# Basalt → rotation")
-env_raw = set_var(env_raw, "AF_UPSTREAMS", f"maas|https://dashscope-intl.aliyuncs.com/compatible-mode/v1|{NEW_KEY}|primary;router|https://api.anyrouter.dev/v1|REDACTED-KEY-ROTATE-ME|fallback",
+env_raw = set_var(env_raw, "AF_UPSTREAMS", UPSTREAMS,
                   "# Upstreams : DashScope intl (Alibaba — ~55 modèles chat) en rotation principale ; ancien routeur en secours")
 env_raw = set_var(env_raw, "AF_STATIC_MODELS", "qwen3.8-flash,qwen3.7-flash,qwen3.5-flash,qwen-plus,qwen-max,qwen3-coder-flash,deepseek-v4.1-flash-1017",
                   "# Pool instantané au boot (confirmés par la découverte ensuite)")

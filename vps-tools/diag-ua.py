@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 """Try several User-Agents against login to find one Cloudflare accepts."""
+import json
 import urllib.error
 import urllib.request
+from af_secrets import admin_credentials
 
-BODIES = b'{"username":"admin","password":"REDACTED-ROTATE-ME"}'
+# F-02 : identifiants admin hors du dépôt (env ou vps-tools/.env.local — échec clair sinon)
+USER, PASSWORD = admin_credentials()
+BODIES = json.dumps({"username": USER, "password": PASSWORD}).encode()
 UAS = [
     None,  # default Python-urllib
     "curl/8.5.0",

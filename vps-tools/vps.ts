@@ -5,15 +5,45 @@
  *   bun run vps.ts put <local> <remote>        -> upload file (SFTP)
  *   bun run vps.ts putdir <localDir> <remoteDir> -> upload directory recursively
  *   bun run vps.ts get <remote> <local>        -> download file
+ *
+ * F-01/F-03 : identifiants hors du dépôt — vps-tools/.env.local (non tracké,
+ * chmod 600) puis variables d'environnement (prioritaires). Échec clair si
+ * absents : aucun identifiant de repli dans le code.
  */
 import { readFileSync, statSync, readdirSync, createReadStream, createWriteStream, mkdirSync } from "node:fs";
-import { join, basename, relative } from "node:path";
+import { join, basename, relative, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import { Client, type ClientCallback, type ConnectConfig, type ExecOptions, SFTPWrapper } from "ssh2";
 
-const HOST = process.env.VPS_HOST || "95.111.226.63";
-const PORT = Number(process.env.VPS_PORT || 22);
-const USER = process.env.VPS_USER || "aenews";
-const PASS = process.env.VPS_PASS || "REDACTED";
+/** Parse `clé=valeur` d'un .env.local non tracké (lignes # ignorées, guillemets retirés). */
+function loadEnvLocal(): Record<string, string> {
+  try {
+    const raw = readFileSync(join(dirname(fileURLToPath(import.meta.url)), ".env.local"), "utf8");
+    const out: Record<string, string> = {};
+    for (const line of raw.split(/\r?\n/)) {
+      const m = /^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$/.exec(line);
+      if (m) out[m[1]] = m[2].replace(/^["']|["']$/g, "");
+    }
+    return out;
+  } catch {
+    return {}; // fichier absent → seules les variables d'environnement comptent
+  }
+}
+
+const envLocal = loadEnvLocal();
+const env = (key: string): string => process.env[key] || envLocal[key] || "";
+
+const HOST = env("VPS_HOST");
+const PORT = Number(env("VPS_PORT") || 22);
+const USER = env("VPS_USER");
+const PASS = env("VPS_PASS") || env("VPS_PASSWORD");
+if (!HOST || !USER || !PASS) {
+  console.error(
+    "VPS-CLI-ERROR: identifiants SSH manquants — définissez VPS_HOST/VPS_USER/VPS_PASS " +
+      "dans l'environnement ou dans vps-tools/.env.local (non tracké, chmod 600)"
+  );
+  process.exit(1);
+}
 
 const cfg: ConnectConfig = {
   host: HOST,

@@ -22,6 +22,10 @@ next-env.d.ts
 .env.*
 !.env.example
 
+# Fichiers de secrets locaux (F-01/F-02 : identifiants VPS/admin, clés API) —
+# jamais trackés : *.local couvre scripts/.secrets.local, vps-tools/.env.local, …
+*.local
+
 # Base de données SQLite (créée par `prisma db push` + seed automatique)
 /db/*.db
 /db/*.db-shm

@@ -3,9 +3,12 @@
 import json
 import sys
 import urllib.request
+from af_secrets import admin_credentials
 
 BASE = "https://auditforge.aenews.online"
 COOKIE = {"v": None}
+# F-02 : identifiants admin hors du dépôt (env ou vps-tools/.env.local — échec clair sinon)
+USER, PASS = admin_credentials()
 
 
 def api(method, path, body=None, timeout=30):
@@ -23,8 +26,7 @@ def api(method, path, body=None, timeout=30):
         return res.status, json.loads(res.read().decode() or "{}")
 
 
-st, _ = api("POST", "/api/auth/login",
-            {"username": "admin", "password": "REDACTED-ROTATE-ME"})
+st, _ = api("POST", "/api/auth/login", {"username": USER, "password": PASS})
 print("login:", st)
 cid = sys.argv[1]
 st, cur = api("GET", f"/api/campaigns/{cid}")

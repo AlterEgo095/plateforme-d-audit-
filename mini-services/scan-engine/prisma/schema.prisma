@@ -47,6 +47,8 @@ model Scan {
   tool          String // PHANTOM | DEEPAUDIT | BASALT | REDAMON
   target        String
   status        String    @default("QUEUED") // QUEUED | RUNNING | COMPLETED | FAILED | CANCELLED
+  // REAL | SIMULATION — renseigné par le moteur
+  mode          String?
   progress      Int       @default(0)
   phase         String    @default("")
   startedAt     DateTime?

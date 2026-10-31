@@ -125,6 +125,9 @@ interface PendingLog {
   message: string;
 }
 
+/** Mode d'exécution HONNÊTE d'un scan — persisté sur Scan.mode (colonne `mode`). */
+export type ScanExecMode = "REAL" | "SIMULATION";
+
 interface RunState {
   phaseIdx: number;
   progress: number;
@@ -135,6 +138,8 @@ interface RunState {
   pending: PendingLog[];
   /** N.25 : nombre d'événements de journal dont la persistance a échoué. */
   droppedLogs: number;
+  /** HONNÊTETÉ : mode réellement suivi par ce scan (REAL | SIMULATION). */
+  execMode: ScanExecMode | null;
 }
 
 // ─── Injection socket.io (évite les imports circulaires) ──────────────
@@ -620,6 +625,15 @@ export class ScanEngine {
     };
   }
 
+  /** HONNÊTETÉ : persiste le mode d'exécution réel du scan (Scan.mode, best effort). */
+  private async markExecMode(scanId: string, mode: ScanExecMode): Promise<void> {
+    try {
+      await db.scan.update({ where: { id: scanId }, data: { mode } });
+    } catch (err) {
+      console.warn(`[engine] marquage mode=${mode} impossible pour ${scanId}`, err);
+    }
+  }
+
   private async runScan(cfg: EngineRunParams, ctrl: RunningEntry): Promise<void> {
     const t0 = Date.now();
     const seed = hashString(cfg.scanId);
@@ -652,6 +666,7 @@ export class ScanEngine {
       lastFlush: Date.now(),
       pending: [],
       droppedLogs: 0,
+      execMode: null,
     };
 
     const pushLog = (level: LogLevel, source: string, message: string): void => {
@@ -698,16 +713,21 @@ export class ScanEngine {
       if (adapter) {
         const avail = await adapter.checkAvailable();
         if (avail.available) {
+          st.execMode = "REAL";
+          await this.markExecMode(cfg.scanId, "REAL");
           await this.runRealScan(cfg, ctrl, st, pushLog, flushPending, adapter, bounds[0].name);
           return;
         }
         if (mode === "real") {
           throw new Error(`Exécution réelle indisponible pour ${cfg.tool} : ${avail.reason ?? "environnement non préparé"}`);
         }
+        // HONNÊTETÉ : la bascule en simulation produit des résultats SYNTHÉTIQUES —
+        // elle est marquée ERROR (et non WARN) pour être visible dans le journal
+        // et l'UI, avec la cause exacte de l'échec de la sonde de disponibilité.
         pushLog(
-          "WARN",
+          "ERROR",
           "systeme",
-          `Exécution réelle indisponible pour ${cfg.tool} (${avail.reason ?? "inconnue"}) — bascule en SIMULATION pour ce scan.`,
+          `⚠️ SIMULATION — résultats synthétiques NON issus d'outils réels (cause: ${avail.reason ?? "inconnue"}). Aucun outil n'a été exécuté pour ce scan.`,
         );
       } else if (mode === "real") {
         throw new Error(
@@ -715,12 +735,16 @@ export class ScanEngine {
         );
       } else {
         pushLog(
-          "WARN",
+          "ERROR",
           "systeme",
-          `${cfg.tool} : adaptateur réel non implémenté (plateforme dédiée requise) — SIMULATION pour ce scan.`,
+          `⚠️ SIMULATION — résultats synthétiques NON issus d'outils réels (cause: adaptateur réel non implémenté pour ${cfg.tool} — plateforme dédiée requise). Aucun outil n'a été exécuté pour ce scan.`,
         );
       }
     }
+    // Simulation explicite (TOOL_EXECUTION_MODE=simulation) OU bascule auto→simulation :
+    // le scan produira des résultats synthétiques — honnêteté des statuts.
+    st.execMode = "SIMULATION";
+    await this.markExecMode(cfg.scanId, "SIMULATION");
 
     // Script de simulation (lignes triées, atMs strictement croissant)
     const script = SCRIPT_BUILDERS[cfg.tool]({
@@ -864,6 +888,8 @@ export class ScanEngine {
     await this.notifyDroppedLogs(cfg, st);
 
     // Mise à jour finale COMPLETED — 1 essai + 1 retry après 500 ms (N.25).
+    // HONNÊTETÉ : le mode réellement suivi est repersisté ici (filet de sécurité
+    // si le marquage au démarrage a échoué — SQLite brièvement occupée).
     const finalData = {
       status: "COMPLETED",
       progress: 100,
@@ -872,6 +898,7 @@ export class ScanEngine {
       durationMs,
       findingsCount: st.findingsCount,
       criticalCount: st.criticalCount,
+      ...(st.execMode ? { mode: st.execMode } : {}),
     } as const;
     let completed = false;
     try {

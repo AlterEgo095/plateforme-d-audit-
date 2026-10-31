@@ -2,6 +2,9 @@
  * AuditForge — Utilitaires subprocess pour les adaptateurs réels.
  *
  * - which(bin) : résolution d'un binaire dans le PATH ;
+ * - probeBinary/probeBinaryWithRetry : sonde de disponibilité STRUCTURÉE —
+ *   distingue ENOENT / timeout / code de sortie / erreur (honnêteté des
+ *   statuts), journalise chaque échec (WARN) et retente une fois sur timeout ;
  * - runStreaming : exécute une commande, diffuse chaque ligne (stdout+stderr)
  *   via le callback, résout avec le code de sortie ; annulable via signal ;
  * - killTree : tue le processus et ses enfants (groups de processus POSIX).
@@ -25,14 +28,57 @@ export function which(bin: string): string | null {
   return null;
 }
 
-/** Version courte d'un binaire (première ligne de sa sortie d'info), null si indisponible. */
-export async function probeVersion(
+/** Résolution structurée d'une sonde de disponibilité — causes DISTINCTES (honnêteté). */
+export type ProbeOutcome =
+  | { status: "ok"; version: string }
+  /** Binaire absent du PATH (ENOENT) — installable, ne passera jamais. */
+  | { status: "missing" }
+  /** Binaire présent mais sonde tuée après timeout (démarrage à froid lent). */
+  | { status: "timeout"; timeoutMs: number }
+  /** Processus terminé (code M) sans ligne de version exploitable. */
+  | { status: "exit"; exitCode: number | null }
+  /** Erreur de spawn / lecture (E). */
+  | { status: "error"; error: string };
+
+/**
+ * Message FR d'un échec de sonde — distingue ENOENT, timeout, code de sortie
+ * et erreur. Un « binaire introuvable » abusif (ex. semgrep lent à froid tué
+ * par le timeout) a déjà fait basculer des scans en simulation à tort.
+ */
+export function describeProbeFailure(bin: string, outcome: ProbeOutcome): string {
+  switch (outcome.status) {
+    case "ok":
+      return outcome.version;
+    case "missing":
+      return `binaire « ${bin} » introuvable (ENOENT) dans le PATH du moteur`;
+    case "timeout": {
+      const sec = Math.round(outcome.timeoutMs / 1000);
+      return `sonde de disponibilité échouée : timeout après ${sec} s (binaire « ${bin} » présent mais lent au démarrage)`;
+    }
+    case "exit":
+      return `sonde de disponibilité échouée : code de sortie ${outcome.exitCode ?? "inconnu"} (binaire « ${bin} » sans sortie exploitable)`;
+    case "error":
+      return `sonde de disponibilité échouée : erreur « ${outcome.error} » (binaire « ${bin} »)`;
+  }
+}
+
+/**
+ * Sonde structurée d'un binaire : exécute `args` (défaut --version) et classe
+ * l'issue (ok / ENOENT / timeout / code de sortie / erreur). Chaque échec est
+ * JOURNALISÉ (WARN) au moment où il se produit — la sonde est le seul endroit
+ * qui sait pourquoi l'exécution réelle est déclarée indisponible.
+ */
+export async function probeBinary(
   bin: string,
   timeoutMs = 8000,
   args: string[] = ["--version"],
-): Promise<string | null> {
+): Promise<ProbeOutcome> {
   const resolved = which(bin);
-  if (!resolved) return null;
+  if (!resolved) {
+    const outcome: ProbeOutcome = { status: "missing" };
+    console.warn(`[real-exec] ${describeProbeFailure(bin, outcome)}`);
+    return outcome;
+  }
   // Bun ≥ 1.3 : pour un processus qui se termine en < ~100 ms (les outils Go
   // rapides — subfinder/httpx/nuclei/amass/ffuf), les événements « data » du
   // pipe stdout peuvent arriver APRÈS « close » (course stdio de
@@ -42,42 +88,47 @@ export async function probeVersion(
   // fichier (écriture synchrone côté enfant), lu après « close ».
   const outPath = join(tmpdir(), `af-probe-${process.pid}-${Date.now()}.log`);
   let fd: number | null = null;
+  let outcome: ProbeOutcome;
   try {
     fd = openSync(outPath, "w");
-    await new Promise<void>((resolve) => {
+    outcome = await new Promise<ProbeOutcome>((resolve) => {
       let child: ChildProcess;
       try {
         child = spawn(resolved, args, { stdio: ["ignore", fd as number, fd as number] });
-      } catch {
-        resolve();
+      } catch (err) {
+        resolve({ status: "error", error: err instanceof Error ? err.message : String(err) });
         return;
       }
+      let timedOut = false;
       const timer = setTimeout(() => {
+        timedOut = true;
         try {
           child.kill("SIGKILL");
         } catch {
           /* déjà terminé */
         }
-        resolve();
       }, timeoutMs);
-      child.on("error", () => {
+      child.on("error", (err) => {
         clearTimeout(timer);
-        resolve();
+        resolve({ status: "error", error: err.message });
       });
-      child.on("close", () => {
+      child.on("close", (code) => {
         clearTimeout(timer);
-        resolve();
+        if (timedOut) {
+          resolve({ status: "timeout", timeoutMs });
+          return;
+        }
+        const out = existsSync(outPath) ? readFileSync(outPath, "utf8") : "";
+        // Première ligne NON VIDE (rich/Typer pad la sortie d'un retour à la ligne initial).
+        const firstLine = out
+          .split("\n")
+          .map((l) => l.trim())
+          .find((l) => l.length > 0);
+        resolve(firstLine ? { status: "ok", version: firstLine } : { status: "exit", exitCode: code });
       });
     });
-    const out = existsSync(outPath) ? readFileSync(outPath, "utf8") : "";
-    // Première ligne NON VIDE (rich/Typer pad la sortie d'un retour à la ligne initial).
-    const firstLine = out
-      .split("\n")
-      .map((l) => l.trim())
-      .find((l) => l.length > 0);
-    return firstLine ?? null;
-  } catch {
-    return null;
+  } catch (err) {
+    outcome = { status: "error", error: err instanceof Error ? err.message : String(err) };
   } finally {
     try {
       if (fd !== null) closeSync(fd);
@@ -90,6 +141,36 @@ export async function probeVersion(
       /* */
     }
   }
+  if (outcome.status !== "ok") {
+    console.warn(`[real-exec] ${describeProbeFailure(bin, outcome)}`);
+  }
+  return outcome;
+}
+
+/**
+ * Sonde avec 1 retry après 2 s si la cause est un TIMEOUT — les outils lourds
+ * (semgrep : python) démarrent lentement à froid (imports, cache) et passent
+ * au 2e coup. Un succès au retry → exécution RÉELLE normale, aucune bascule.
+ */
+export async function probeBinaryWithRetry(
+  bin: string,
+  timeoutMs = 8000,
+  args: string[] = ["--version"],
+): Promise<ProbeOutcome> {
+  const first = await probeBinary(bin, timeoutMs, args);
+  if (first.status !== "timeout") return first;
+  await new Promise((resolve) => setTimeout(resolve, 2000));
+  return probeBinary(bin, timeoutMs, args);
+}
+
+/** Version courte d'un binaire (première ligne de sa sortie d'info), null si indisponible. */
+export async function probeVersion(
+  bin: string,
+  timeoutMs = 8000,
+  args: string[] = ["--version"],
+): Promise<string | null> {
+  const outcome = await probeBinary(bin, timeoutMs, args);
+  return outcome.status === "ok" ? outcome.version : null;
 }
 
 export interface RunStreamingOptions {

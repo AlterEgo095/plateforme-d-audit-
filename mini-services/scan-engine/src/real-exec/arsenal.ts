@@ -6,8 +6,8 @@
  * Un ARSENAL_SPEC décrit l'outil (binaire, disponibilité, construction des
  * arguments par profil, parsing du rapport) et `makeArsenalAdapter` produit
  * l'adaptateur réel complet :
- *   - disponibilité = binaire résolu (probeVersion) + exigences spécifiques
- *     (wordlist ffuf, registre Semgrep…) — honnêteté des statuts ;
+ *   - disponibilité = binaire résolu (sonde structurée + retry timeout) + exigences
+ *     spécifiques (wordlist ffuf, registre Semgrep…) — honnêteté des statuts ;
  *   - exécution = runStreaming (env sanitisée m7, kill tree, abort, timeout
  *     global REAL_SCAN_TIMEOUT_MIN), lignes diffusées en TOOL + phases ;
  *   - parsing = fichier JSON/JSONL ou capture stdout (sqlmap) → RealFinding[]
@@ -24,7 +24,7 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { REAL_EXEC } from "./env";
 import { prepareTarget } from "./git-target";
-import { probeVersion, runStreaming } from "./proc";
+import { describeProbeFailure, probeBinaryWithRetry, runStreaming } from "./proc";
 import type {
   RealAdapterContext,
   RealAvailability,
@@ -219,6 +219,12 @@ export interface ArsenalSpec {
   bin: () => string;
   /** Arguments de la sonde de version (défaut : --version). */
   versionArgs?: string[];
+  /**
+   * Timeout DÉDIÉ de la sonde de version (ms, défaut 10 s). SEMGREP impose
+   * 30 s : démarrage à froid python lourd (imports) — un timeout à 10 s le
+   * faisait passer pour « binaire introuvable » et basculer en simulation.
+   */
+  probeTimeoutMs?: number;
   /** Types de cibles réellement supportés par l'outil. */
   targets: TargetType[];
   /** Raison d'indisponibilité si l'environnement manque d'un prérequis. */
@@ -245,13 +251,18 @@ export function makeArsenalAdapter(spec: ArsenalSpec): RealToolAdapter {
     tool: spec.tool,
 
     async checkAvailable(): Promise<RealAvailability> {
-      const version = await probeVersion(spec.bin(), 10_000, spec.versionArgs ?? ["--version"]);
-      if (!version) {
-        return {
-          available: false,
-          reason: `binaire « ${spec.bin()} » introuvable dans le PATH du moteur (voir README — arsenal P5)`,
-        };
+      // HONNÊTETÉ : sonde STRUCTURÉE — ENOENT (binaire absent) ≠ timeout
+      // (binaire présent mais lent à froid) ≠ code de sortie anormal ;
+      // 1 retry après 2 s sur timeout (les lents à froid passent au 2e coup).
+      const probed = await probeBinaryWithRetry(
+        spec.bin(),
+        spec.probeTimeoutMs ?? 10_000,
+        spec.versionArgs ?? ["--version"],
+      );
+      if (probed.status !== "ok") {
+        return { available: false, reason: describeProbeFailure(spec.bin(), probed) };
       }
+      const version = probed.version;
       if (spec.checkExtra) {
         const extra = await spec.checkExtra();
         if (extra && !extra.available) return { ...extra, version };
@@ -1016,6 +1027,8 @@ const semgrepSpec: ArsenalSpec = {
   tool: "SEMGREP",
   bin: () => REAL_EXEC.semgrepBin,
   versionArgs: ["--version"],
+  // Démarrage à froid python lourd (~3 s à chaud, > 10 s à froid) — sonde à 30 s.
+  probeTimeoutMs: 30_000,
   targets: ["GIT"],
   cap: 300,
   phases: [

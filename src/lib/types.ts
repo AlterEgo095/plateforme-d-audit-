@@ -52,6 +52,13 @@ export type ScanStatus =
   | "FAILED"
   | "CANCELLED";
 
+/**
+ * Mode d'exécution réellement suivi par un scan — renseigné par le moteur
+ * (Scan.mode). REAL = outil authentique exécuté ; SIMULATION = résultats
+ * synthétiques (fallback auto ou mode simulé explicite). null = scans anciens.
+ */
+export type ScanExecMode = "REAL" | "SIMULATION";
+
 export type Severity = "CRITICAL" | "HIGH" | "MEDIUM" | "LOW" | "INFO";
 
 export type Confidence = "CONFIRMED" | "PROBABLE" | "UNVERIFIED";
@@ -84,6 +91,8 @@ export interface ScanDTO {
   tool: Tool;
   target: string;
   status: ScanStatus;
+  /** REAL | SIMULATION — honnêteté : badge UI distinct si simulé. */
+  mode: ScanExecMode | null;
   progress: number;
   phase: string;
   startedAt: string | null;

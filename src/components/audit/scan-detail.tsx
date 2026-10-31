@@ -24,6 +24,7 @@ import {
   ScanStatusBadge,
   SeverityBadge,
   SentinelBadge,
+  SimulationBadge,
   TARGET_TYPE_LABELS,
   ToolBadge,
   formatDateTime,
@@ -311,6 +312,8 @@ export function ScanDetail({
                     {scan.target}
                   </span>
                   <ScanStatusBadge status={scan.status} />
+                  {/* Honnêteté : badge ambre si résultats synthétiques */}
+                  {scan.mode === "SIMULATION" && <SimulationBadge />}
                 </>
               ) : (
                 <Skeleton className="h-5 w-48" />
@@ -479,7 +482,15 @@ export function ScanDetail({
                       scan.durationMs !== null ? formatDuration(scan.durationMs) : "—"
                     }
                   />
-                  <InfoRow label="Statut" value={<ScanStatusBadge status={scan.status} />} />
+                  <InfoRow
+                    label="Statut"
+                    value={
+                      <span className="flex items-center gap-1.5">
+                        <ScanStatusBadge status={scan.status} />
+                        {scan.mode === "SIMULATION" && <SimulationBadge />}
+                      </span>
+                    }
+                  />
                   <InfoRow
                     label="Vulnérabilités"
                     value={`${scan.findingsCount} au total`}

@@ -166,6 +166,36 @@ export function ScanStatusBadge({
   );
 }
 
+/**
+ * Honnêteté : badge distinct AMBRE pour un scan exécuté en SIMULATION
+ * (résultats synthétiques, aucun outil réel exécuté). Rien n'est affiché
+ * pour un scan REAL ou sans mode renseigné (scans anciens).
+ */
+export function SimulationBadge({ className }: { className?: string }) {
+  const color = "#f59e0b"; // ambre — distinct des statuts (vert/rouge/gris)
+  return (
+    <span
+      className={cn(
+        "inline-flex items-center gap-1.5 rounded-md border px-2 py-0.5 text-xs font-medium whitespace-nowrap",
+        className
+      )}
+      style={{
+        backgroundColor: `${color}1a`,
+        color,
+        borderColor: `${color}55`,
+      }}
+      title="Simulation — résultats synthétiques NON issus d'un outil réel (aucun outil exécuté)"
+    >
+      <span
+        className="size-1.5 rounded-full"
+        style={{ backgroundColor: color }}
+        aria-hidden
+      />
+      SIMULATION
+    </span>
+  );
+}
+
 const FINDING_STATUS_LABELS: Record<FindingStatus, string> = {
   OPEN: "Ouvert",
   CONFIRMED: "Confirmé",

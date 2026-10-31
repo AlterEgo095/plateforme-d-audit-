@@ -46,6 +46,7 @@ import {
   EmptyState,
   ScanStatusBadge,
   SeverityBadge,
+  SimulationBadge,
   ToolBadge,
   formatDuration,
 } from "@/components/audit/status-badges";
@@ -345,7 +346,11 @@ export function ScansView({
                           </span>
                         </TableCell>
                         <TableCell>
-                          <ScanStatusBadge status={scan.status} />
+                          <div className="flex items-center gap-1.5">
+                            <ScanStatusBadge status={scan.status} />
+                            {/* Honnêteté : badge ambre si résultats synthétiques */}
+                            {scan.mode === "SIMULATION" && <SimulationBadge />}
+                          </div>
                         </TableCell>
                         <TableCell className="hidden sm:table-cell">
                           <div className="flex items-center gap-2">

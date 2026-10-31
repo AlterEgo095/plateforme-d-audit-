@@ -50,6 +50,7 @@ import {
   ScanStatusBadge,
   SEVERITY_LABELS,
   SeverityBadge,
+  SimulationBadge,
   StatCard,
   TOOL_META,
   ToolBadge,
@@ -368,7 +369,11 @@ export function DashboardView({
                         </span>
                       </TableCell>
                       <TableCell className="hidden sm:table-cell">
-                        <ScanStatusBadge status={scan.status} />
+                        <div className="flex items-center gap-1.5">
+                          <ScanStatusBadge status={scan.status} />
+                          {/* Honnêteté : badge ambre si résultats synthétiques */}
+                          {scan.mode === "SIMULATION" && <SimulationBadge />}
+                        </div>
                       </TableCell>
                       <TableCell className="hidden min-w-28 md:table-cell">
                         <div className="flex items-center gap-2">

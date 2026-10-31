@@ -21,6 +21,7 @@ import type {
   LogLevel,
   Profile,
   ScanDTO,
+  ScanExecMode,
   ScanStatus,
   Severity,
   TargetType,
@@ -338,6 +339,8 @@ export function toScanDTO(s: Scan, campaignName?: string | null): ScanDTO {
     tool: s.tool as Tool,
     target: s.target,
     status: s.status as ScanStatus,
+    // REAL | SIMULATION — renseigné par le moteur (null : scans anciens)
+    mode: (s.mode as ScanExecMode | null) ?? null,
     progress: s.progress,
     phase: s.phase,
     startedAt: s.startedAt ? s.startedAt.toISOString() : null,

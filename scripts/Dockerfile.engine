@@ -154,6 +154,11 @@ RUN if [ "$WITH_SECLISTS" = "1" ]; then set -eux; \
       && rm -rf /usr/share/seclists/.git; \
     fi
 
+# Nettoyage cosmétique (fin d'étape finale) : `nuclei -update-templates` (P5)
+# laisse un résidu LevelDB temporaire dans /tmp pendant le build — purge pour
+# que l'image livrée ait un /tmp propre.
+RUN rm -rf /tmp/nuclei* || true
+
 # Bun (binaire autonome) + code du moteur (client Prisma généré inclus).
 COPY --from=oven/bun:1 /usr/local/bin/bun /usr/local/bin/bun
 COPY --from=build /engine /engine

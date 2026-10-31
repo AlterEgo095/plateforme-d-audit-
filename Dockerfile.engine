@@ -76,6 +76,11 @@ RUN sed -i 's/priority_tools=\["nmap", "httpx", "nuclei", "sqlmap", "ffuf", "nik
 COPY --from=oven/bun:1 /usr/local/bin/bun /usr/local/bin/bun
 COPY --from=build /engine /engine
 
+# Nettoyage cosmétique (fin d'étape finale) : un run nuclei pendant le build
+# laisse un résidu LevelDB temporaire dans /tmp — purge pour que l'image
+# livrée ait un /tmp propre (aligné avec scripts/Dockerfile.engine, prod).
+RUN rm -rf /tmp/nuclei* || true
+
 EXPOSE 3030
 
 # BIND_HOST est fourni par docker-compose (0.0.0.0 dans le réseau interne

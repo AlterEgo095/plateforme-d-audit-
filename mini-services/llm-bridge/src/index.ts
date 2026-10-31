@@ -13,21 +13,32 @@
  * requête est rejouée immédiatement sur le modèle suivant du pool.
  *
  * Endpoints :
- *   GET  /health                → {ok, pool:{healthy,total}} (sans auth)
+ *   GET  /health                → {ok, pool:{healthy,exhausted,total}} (sans auth)
  *   GET  /v1/models             → modèles du pool (+ alias auditforge-auto)
  *   POST /v1/chat/completions   → complétion avec rotation + failover
- *   GET  /v1/pool               → état détaillé du pool (ops)
- *   POST /v1/pool/refresh       → force une re-découverte
+ *   GET  /v1/pool               → état détaillé du pool (ops — compteurs + exclusions)
+ *   POST /v1/pool/refresh       → reset manuel des épuisements + re-découverte
  *
  * Auth : si LLM_BRIDGE_KEY est défini, `Authorization: Bearer <key>` est
  * exigé (comparaison à temps constant). Sinon endpoint ouvert (réseau
  * interne uniquement).
+ *
+ * Épuisement (2-c) : un 402 amont (solde) ou un 4xx « quota/balance/billing »
+ * (ex. DashScope free quota exhausted) est STRUCTUREL — l'upstream sort de la
+ * rotation 6 h (AF_EXHAUSTED_WINDOW_MS) et la requête répond immédiatement
+ * 503 {type:"pool_exhausted", Retry-After:21600} au lieu de boucler 45 s.
+ * NOTE transparence : le pont ne filtre PAS les refus sémantiques des modèles
+ * (200 « I can't provide… » / corps {"status":"refused"}) — ils sont relayés
+ * tels quels ; c'est la sonde de capacité de PHANTOM qui les détecte.
  *
  * Configuration :
  *   AF_UPSTREAMS      nom|base|clé|role;nom2|base2|clé2|role2  (role: primary|fallback)
  *   AF_STATIC_MODELS  liste de secours (virgules) ajoutée comme « unverified »
  *   AF_REFRESH_MS     période de re-découverte (défaut 15 min)
  *   AF_ATTEMPTS       tentatives max par requête (défaut 5)
+ *   AF_POOL_WAIT_MS   attente entre balayages (défaut 45 s, 0 = désactivé)
+ *   AF_POOL_MAX_SWEEPS  balayages max du pool (défaut 3)
+ *   AF_EXHAUSTED_WINDOW_MS  fenêtre d'exclusion d'un upstream épuisé (défaut 6 h)
  *   LLM_BRIDGE_KEY    clé Bearer exigée des clients (défaut : ouverte)
  *
  * Port : 3031 (convention AuditForge). Bind : BIND_HOST (0.0.0.0 en Docker).
@@ -56,12 +67,24 @@ const TTFB_TIMEOUT_MS = clampInt(process.env.AF_TTFB_TIMEOUT_MS, 10_000, 900_000
 /** Silence maximal en flux (reset à chaque chunk). */
 const IDLE_TIMEOUT_MS = clampInt(process.env.AF_IDLE_TIMEOUT_MS, 10_000, 3_600_000, 600_000);
 /**
- * Tempête de cooldown : attente avant une 2e (et dernière) balayage du pool.
- * 0 désactive. Les cooldowns de base (90 s) expirant vite, une attente unique
- * de 45 s sauve un appel d'agent qui mourrait sinon d'un pool momentanément
- * à sec (403 quota transitoires en rafale sur les upstreams gratuits).
+ * Tempête de cooldown : attente entre DEUX balayages du pool. 0 désactive.
+ * Les cooldowns de base (90 s) expirant vite, une attente de 45 s sauve un
+ * appel d'agent qui mourrait sinon d'un pool momentanément à sec (403 quota
+ * transitoires en rafale sur les upstreams gratuits).
  */
 const POOL_WAIT_MS = clampInt(process.env.AF_POOL_WAIT_MS, 0, 300_000, 45_000);
+/**
+ * Nombre maximal de balayages complets du pool (avec attente POOL_WAIT_MS
+ * entre eux) avant de répondre 503 pool_busy — borne l'attente du client
+ * (~2×45 s max au lieu d'une boucle indéfinie).
+ */
+const POOL_MAX_SWEEPS = clampInt(process.env.AF_POOL_MAX_SWEEPS, 1, 5, 3);
+/**
+ * Fenêtre d'exclusion d'un upstream « épuisé » (quota/solde) — la requête
+ * cliente reçoit Retry-After aligné sur cette valeur.
+ */
+const EXHAUSTED_WINDOW_MS = clampInt(process.env.AF_EXHAUSTED_WINDOW_MS, 60_000, 24 * 3_600_000, 6 * 3_600_000);
+const EXHAUSTED_RETRY_AFTER_S = Math.round(EXHAUSTED_WINDOW_MS / 1000);
 
 /** Spécialisés (OCR/vision-lone/traduction) exclus de la rotation agentique. */
 const DISCOVERY_EXCLUDE =
@@ -81,6 +104,7 @@ if (UPSTREAMS.length === 0) {
 
 const pool = new ModelPool(UPSTREAMS, {
   probeTimeoutMs: PROBE_TIMEOUT_MS,
+  exhaustedWindowMs: EXHAUSTED_WINDOW_MS,
   excludeRe: DISCOVERY_EXCLUDE,
   logger: (m) => console.log(`[llm-bridge] ${m}`),
 });
@@ -136,10 +160,6 @@ function authorized(req: IncomingMessage): boolean {
   return a.length === b.length && timingSafeEqual(a, b);
 }
 
-function completionId(): string {
-  return `chatcmpl-bridge-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-}
-
 // ── Tentative upstream (proxy transparent) ───────────────────────────────────
 
 type AttemptResult =
@@ -151,7 +171,6 @@ async function attemptUpstream(
   parsed: Record<string, unknown>,
   wantsStream: boolean,
   clientRes: ServerResponse,
-  clientReq: IncomingMessage,
 ): Promise<AttemptResult> {
   const ctrl = new AbortController();
   let ttfb: NodeJS.Timeout | null = setTimeout(
@@ -190,8 +209,13 @@ async function attemptUpstream(
     if (!res.ok) {
       clearTimers();
       const errText = (await res.text().catch(() => "")).slice(0, 8192);
-      const cls = classifyFailure(res.status);
-      if (cls.cooldown) pool.markFailure(c, res.status, errText.slice(0, 160));
+      const cls = classifyFailure(res.status, errText);
+      if (cls.exhausted) {
+        // Épuisement structurel (solde/quota) : upstream ENTIER hors rotation
+        // pour la fenêtre longue — inutile de griller les autres modèles du
+        // même compte (ils partagent le quota).
+        pool.exhaustUpstream(c.upstream.name, errText.replace(/\s+/g, " ").slice(0, 200), res.status);
+      } else if (cls.cooldown) pool.markFailure(c, res.status, errText.slice(0, 160));
       else pool.markSoftFail(c, errText.slice(0, 160));
       // Journal corps d'erreur upstream : sans lui, un 400/403 amont est
       // indistinguible d'un autre (« dernière erreur HTTP 400 » ne dit pas
@@ -260,6 +284,42 @@ async function attemptUpstream(
 
 // ── Route : chat completions (rotation + failover) ───────────────────────────
 
+/**
+ * Réponse « pool hors service » : distingue l'épuisement STRUCTUREL (quota/
+ * solde épuisés — 503 pool_exhausted immédiat, Retry-After = fenêtre d'exclu-
+ * sion) d'une saturation TRANSITOIRE (cooldowns 429/timeout — 503 pool_busy).
+ * Un 503 pool_exhausted explicite évite à l'agent litellm d'attendre en boucle
+ * (cause racine des « JSON final illisible » de PHANTOM).
+ */
+function respondPoolDown(res: ServerResponse, detail: string | null, context: string): void {
+  const exhausted = pool.exhaustedUpstreams();
+  if (pool.healthyCount() === 0 && exhausted.length > 0) {
+    console.error(
+      `[llm-bridge] pool ÉPUISÉ (${context}) — upstreams exclus : ` +
+        exhausted.map((u) => `${u.name} (${u.reason.slice(0, 120)})`).join(" | "),
+    );
+    json(res, 503, {
+      error: {
+        message:
+          "Pool LLM épuisé : quota/balance épuisés sur tous les fournisseurs configurés. " +
+          "Réapprovisionner les clés ou attendre la réinitialisation du quota.",
+        type: "pool_exhausted",
+        detail,
+        retry_after_seconds: EXHAUSTED_RETRY_AFTER_S,
+      },
+    }, { "Retry-After": String(EXHAUSTED_RETRY_AFTER_S) });
+    return;
+  }
+  json(res, 503, {
+    error: {
+      message: "Aucun modèle disponible dans le pool (découverte en cours ou tous en cooldown) — réessayez",
+      type: "pool_busy",
+      detail,
+      retry_after_s: 30,
+    },
+  }, { "Retry-After": "30" });
+}
+
 async function handleChatCompletions(req: IncomingMessage, res: ServerResponse): Promise<void> {
   let parsed: Record<string, unknown>;
   try {
@@ -276,36 +336,40 @@ async function handleChatCompletions(req: IncomingMessage, res: ServerResponse):
   const wantsStream = parsed.stream === true;
   const preferred = normalizePreferred(parsed.model);
 
+  // Fail-fast pré-tentatives : aucun candidat ET au moins un upstream épuisé
+  // (quota/solde) → 503 immédiat, sans aucune attente (2-c).
   if (pool.candidatesFor(preferred).length === 0) {
-    json(res, 503, {
-      error: {
-        message: "Aucun modèle disponible dans le pool (découverte en cours ou tous en cooldown) — réessayez",
-        type: "pool_exhausted",
-        retry_after_s: 30,
-      },
-    });
+    respondPoolDown(res, null, "pré-tentatives");
     return;
   }
 
-  // 1 à 2 balayages du pool ; le 2e, après POOL_WAIT_MS, laisse expirer les
-  // cooldowns courts — c'est ce qui sauve les agents pendant les tempêtes
-  // de 403 transitoires des upstreams gratuits.
-  // NOTE : un 400 amont n'interrompt PLUS le 2e balayage. Un 400 d'UN
-  // candidat (quota masqué, modèle capricieux, champ refusé par un seul
-  // fournisseur) ne préjuge pas des autres — et tuer l'agent litellm avec
-  // un BadRequestError (non retryable) est bien pire que 45 s d'attente.
-  const rounds = POOL_WAIT_MS > 0 ? 2 : 1;
+  // Balayages bornés (2-c) : 1 à POOL_MAX_SWEEPS passes complètes, séparées
+  // par POOL_WAIT_MS — laisse expirer les cooldowns courts des 403 transi-
+  // toires, SANS boucler indéfiniment. Un 400 amont n'interrompt PAS le
+  // balayage (un modèle capricieux ne préjuge pas des autres) — mais il
+  // borne bien la durée totale d'attente du client.
+  const sweeps = POOL_WAIT_MS > 0 ? POOL_MAX_SWEEPS : 1;
   let last: AttemptResult | null = null;
   let attemptsTotal = 0;
-  for (let round = 0; round < rounds; round++) {
-    if (round > 0) {
-      console.warn(`[llm-bridge] pool à sec — nouvelle tentative après ${Math.round(POOL_WAIT_MS / 1000)}s de délai`);
+  let nonRetriable = false;
+  for (let sweep = 0; sweep < sweeps; sweep++) {
+    if (sweep > 0) {
+      // Plus aucun candidat disponible à court terme : patienter ne sert à
+      // rien (un épuisement dure des heures) — décision immédiate.
+      if (pool.candidatesFor(preferred).length === 0) break;
+      console.warn(
+        `[llm-bridge] pool à sec — nouvelle tentative ${sweep + 1}/${sweeps} après ${Math.round(POOL_WAIT_MS / 1000)}s de délai`,
+      );
       await new Promise((r) => setTimeout(r, POOL_WAIT_MS));
+      if (pool.candidatesFor(preferred).length === 0) break;
     }
     const candidates = pool.candidatesFor(preferred).slice(0, ATTEMPTS);
     for (const c of candidates) {
+      // Un upstream peut devenir épuisé PENDANT le balayage — ne pas le
+      // réessayer (ses autres modèles sont exclus en bloc).
+      if (pool.isExhausted(c.upstream.name)) continue;
       attemptsTotal += 1;
-      const r = await attemptUpstream(c, parsed, wantsStream, res, req);
+      const r = await attemptUpstream(c, parsed, wantsStream, res);
       if (r.ok) {
         if (wantsStream) return; // flux déjà relayé tel quel
         console.log(
@@ -316,28 +380,38 @@ async function handleChatCompletions(req: IncomingMessage, res: ServerResponse):
       }
       last = r;
       if (r.streamBroken) return; // réponse partielle déjà envoyée
-      if (!r.retriable) break;
+      if (!r.retriable) {
+        nonRetriable = true;
+        break;
+      }
     }
-    if (last && !last.retriable) break;
+    if (nonRetriable) break;
   }
 
+  // Décision finale honnête après épuisement des balayages : aucun upstream
+  // sain + au moins un épuisé → 503 pool_exhausted (Retry-After long) ; sinon
+  // saturation transitoire → 503 pool_busy (Retry-After court). Le type
+  // explicite permet au pré-vol PHANTOM d'échouer avec la bonne cause, et le
+  // corps amont reste disponible pour l'ops via `detail`.
+  const detail = last?.errText?.replace(/\s+/g, " ").slice(0, 600) ?? null;
+  if (nonRetriable && !(pool.healthyCount() === 0 && pool.exhaustedCount() > 0)) {
+    console.error(
+      `[llm-bridge] échec après ${attemptsTotal} tentative(s) — dernière erreur HTTP ${last?.status ?? "?"} (non rejouable)`,
+    );
+    json(res, 503, {
+      error: {
+        message: `Tous les modèles du pool ont échoué (${attemptsTotal} tentative(s)) — réessayez dans 60s`,
+        type: "pool_busy",
+        detail,
+        retry_after_s: 60,
+      },
+    }, { "Retry-After": "60" });
+    return;
+  }
   console.error(
-    `[llm-bridge] échec après ${attemptsTotal} tentative(s) — dernière erreur HTTP ${last?.status ?? "?"}`,
+    `[llm-bridge] échec après ${attemptsTotal} tentative(s) — dernière erreur HTTP ${last?.status ?? "?"} — ${pool.summary()}`,
   );
-  // Épuisement du pool → TOUJOURS 429 (retryable) avec Retry-After, y compris
-  // quand la dernière erreur amont est un 400 : relayer ce 400 tuerait
-  // l'agent litellm (BadRequestError non retryable) au lieu de le faire
-  // patienter jusqu'à l'expiration des cooldowns. Le corps amont reste
-  // disponible pour l'ops via `detail` et les logs « échec amont ».
-  const retryAfterS = 60;
-  json(res, 429, {
-    error: {
-      message: `Tous les modèles du pool ont échoué — pool en cooldown, réessayez dans ${retryAfterS}s`,
-      type: "pool_exhausted",
-      detail: last?.errText?.replace(/\s+/g, " ").slice(0, 600) ?? null,
-      retry_after_s: retryAfterS,
-    },
-  }, { "Retry-After": String(retryAfterS) });
+  respondPoolDown(res, detail, `après ${attemptsTotal} tentative(s)`);
 }
 
 // ── Routes annexes ───────────────────────────────────────────────────────────
@@ -373,8 +447,17 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
     json(res, 200, {
       ok: true,
       service: "auditforge-llm-bridge",
-      pool: { healthy: pool.healthyCount(), total: snap.entries.length },
-      upstreams: snap.upstreams.map((u) => ({ name: u.name, role: u.role, healthy: u.healthy })),
+      pool: {
+        healthy: pool.healthyCount(),
+        exhausted: snap.counts.exhausted,
+        total: snap.entries.length,
+      },
+      upstreams: snap.upstreams.map((u) => ({
+        name: u.name,
+        role: u.role,
+        healthy: u.healthy,
+        exhausted: u.exhausted,
+      })),
     });
     return;
   }
@@ -398,6 +481,9 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
       json(res, 401, { error: { message: "Non autorisé", type: "auth_error" } });
       return;
     }
+    // Reset manuel (2-c) : lève les exclusions « exhausted » — l'opérateur
+    // vient de réapprovisionner quota/solde et veut re-sonder immédiatement.
+    pool.clearExhausted();
     void pool.refresh().catch(() => undefined);
     json(res, 202, { started: true });
     return;

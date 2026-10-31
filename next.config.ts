@@ -33,6 +33,8 @@ const securityHeaders = [
 const nextConfig: NextConfig = {
   output: "standalone",
   reactStrictMode: false,
+  // F-12 : ne pas divulguer la pile technique (en-tête X-Powered-By: Next.js).
+  poweredByHeader: false,
   async headers() {
     return [
       {

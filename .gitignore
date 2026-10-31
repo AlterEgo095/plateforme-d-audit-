@@ -2,6 +2,7 @@
 
 # Dépendances
 node_modules
+__pycache__/
 /.pnp
 .pnp.*
 .yarn/*

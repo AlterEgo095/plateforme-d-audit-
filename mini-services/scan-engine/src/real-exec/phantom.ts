@@ -19,7 +19,7 @@
 import { REAL_EXEC } from "./env";
 import { prepareTarget } from "./git-target";
 import { MAX_LINE_LENGTH_HARD, probeVersion, runStreaming } from "./proc";
-import { probeLlmEndpoint, stripLlmProvider } from "./llm-probe";
+import { fetchPoolSummary, probeLlmCapacity, probeLlmEndpoint, stripLlmProvider } from "./llm-probe";
 import type {
   RealAdapterContext,
   RealAvailability,
@@ -291,10 +291,10 @@ export class PhantomAdapter implements RealToolAdapter {
     const target = await prepareTarget(ctx);
     const mode = ctx.profile === "QUICK" ? "quick" : ctx.profile === "DEEP" ? "deep" : "standard";
 
-    // P5-fix : re-sonde LLM juste avant l'exécution (l'état de checkAvailable
-    // peut dater — cache tools-status 60 s, solde épuisé entre-temps). Échec
-    // IMMÉDIAT avec cause claire plutôt que 20 s de sandbox morte puis
-    // « JSON final illisible ».
+    // P5-fix : re-sonde LLM juste avant l'exécution — étape 1/2 (joignabilité,
+    // 1 token) : l'état de checkAvailable peut dater (cache tools-status 60 s,
+    // solde épuisé entre-temps). Échec IMMÉDIAT avec cause claire plutôt que
+    // 20 s de sandbox morte puis « JSON final illisible ».
     const llm = await probeLlmEndpoint({
       apiKey: REAL_EXEC.llmApiKey,
       apiBase: REAL_EXEC.llmApiBase,
@@ -302,6 +302,54 @@ export class PhantomAdapter implements RealToolAdapter {
     });
     if (!llm.ok) {
       throw new Error(`Phantom impossible : LLM hors service — ${llm.reason}`);
+    }
+
+    // 2-c — étape 2/2 du pré-vol : sonde de CAPACITÉ. Un « ping » 200 ne
+    // garantit NI le quota (503 pool_exhausted/pool_busy du pont — quota
+    // DashScope épuisé, balance routeur à 0 $), NI la coopération du modèle
+    // (refus sémantique « I can't provide… »). On teste les deux avec un
+    // prompt représentatif AVANT de payer 20 s de sandbox + un agent mort.
+    await ctx.onLog(
+      "Pré-vol LLM (2/2) : sonde de capacité — prompt représentatif, ≤ 90 s…",
+      "INFO",
+      "phantom",
+    );
+    const cap = await probeLlmCapacity({
+      apiKey: REAL_EXEC.llmApiKey,
+      apiBase: REAL_EXEC.llmApiBase,
+      model: stripLlmProvider(REAL_EXEC.phantomLlm || "glm-4.6"),
+      timeoutMs: 90_000,
+    });
+    switch (cap.kind) {
+      case "ok":
+        await ctx.onLog(
+          `Pré-vol LLM OK (modèle ${cap.modelServed ?? REAL_EXEC.phantomLlm}, ${Math.round(cap.latencyMs / 100) / 10} s) — aperçu : ${cap.preview || "(vide)"}`,
+          "INFO",
+          "phantom",
+        );
+        break;
+      case "pool_exhausted":
+        throw new Error(
+          `Pool LLM indisponible (quota/balance épuisés) — PHANTOM non exécuté. Détail : ${cap.detail}. ` +
+            "Action : réapprovisionner les upstreams (DashScope maas : quota gratuit épuisé ; routeur : balance 0 $) " +
+            "puis POST /v1/pool/refresh, ou attendre la réinitialisation du quota.",
+        );
+      case "refused":
+        throw new Error(
+          "Les modèles LLM disponibles refusent les demandes de test d'intrusion (filtre fournisseur) — " +
+            `PHANTOM ne peut pas produire un audit réel, non exécuté. Réponse : ${cap.detail}. ` +
+            "Action : intégrer au pool un modèle tolérant au contenu de sécurité, puis POST /v1/pool/refresh.",
+        );
+      case "http_error":
+        throw new Error(
+          `Endpoint LLM en erreur HTTP ${cap.status} — PHANTOM non exécuté. Détail : ${cap.detail}. ` +
+            "Action : vérifier /v1/pool et les clés API des upstreams.",
+        );
+      case "unreachable":
+        throw new Error(
+          `Endpoint LLM injoignable (${cap.detail}) — PHANTOM non exécuté. ` +
+            "Action : vérifier LLM_API_BASE/LLM_API_KEY et l'état du conteneur llm-bridge.",
+        );
     }
 
     // Garde-fou anti-faux « 0 vulnérabilité » : une cible HTTP injoignable
@@ -331,59 +379,103 @@ export class PhantomAdapter implements RealToolAdapter {
       [/report|enrich|mitre|cvss/i, "RAPPORT", 92],
     ];
 
-    const result = await runStreaming({
-      cmd: REAL_EXEC.phantomBin,
-      args: ["scan", "-t", target.value, "-m", mode, "--non-interactive", "--json"],
-      cwd: ctx.workdir,
-      timeoutMs: REAL_EXEC.timeoutMinutes * 60_000,
-      signal: ctx.signal,
-      // Ligne NON tronquée à 2000 : le JSON final contient des champs
-      // (poc_script_code, evidence…) bien plus longs — la troncature
-      // corrompait le JSON et perdait TOUS les constats. L'affichage reste
-      // tronqué côté onLog (voir onLine ci-dessous).
-      maxLineLength: MAX_LINE_LENGTH_HARD,
-      env: {
-        // LLM via LiteLLM — pont Z.ai ou endpoint OpenAI-compatible direct
-        PHANTOM_LLM: REAL_EXEC.phantomLlm,
-        LLM_API_KEY: REAL_EXEC.llmApiKey,
-        LLM_API_BASE: REAL_EXEC.llmApiBase,
-        PHANTOM_SCAN_MODE: mode,
-        PYTHONUNBUFFERED: "1",
-        // les scans Phantom créent leur dossier de runs dans le cwd
-        PHANTOM_TELEMETRY: "false",
-        // Sandbox Kali éventuellement enrichie (PHANTOM_IMAGE, voir env.ts).
-        // Transmission EXPLICITE obligatoire : sanitizedEnv() (audit m7)
-        // ne forward que l'allowlist système vers les CLI d'audit — sans
-        // cette ligne, phantom ignore l'env du conteneur moteur et retombe
-        // sur son image amont. Chaîne vide exclue : Config.get() retournerait
-        // "" (falsy) → phantom lèverait « PHANTOM_IMAGE must be configured ».
-        ...(REAL_EXEC.phantomImage ? { PHANTOM_IMAGE: REAL_EXEC.phantomImage } : {}),
-        // Compresseur mémoire (voir env.ts) : sans cette ligne, phantom
-        // retombe sur son défaut amont « DeepSeek-V3.2 » (sans préfixe
-        // provider) → « LLM Provider NOT provided » à chaque compression.
-        ...(REAL_EXEC.phantomCompressorLlm
-          ? { PHANTOM_COMPRESSOR_LLM: REAL_EXEC.phantomCompressorLlm }
-          : {}),
-      },
-      onLine: async (line, isErr) => {
-        if (!line.trim()) return;
-        // stdoutAll conserve la ligne ENTIÈRE (parsing du JSON final) ;
-        // la journalisation affiche une version tronquée (hygiène m7).
-        stdoutAll = (stdoutAll + line + "\n").slice(-400_000); // fenêtre glissante
-        await ctx.onLog(
-          line.length > 2000 ? line.slice(0, 2000) + "…" : line,
-          isErr ? "WARN" : "TOOL",
-          "phantom",
-        );
-        for (const [re, phase, pct] of phasePatterns) {
-          if (phase !== lastPhase && re.test(line)) {
-            lastPhase = phase;
-            await ctx.onPhase(phase, pct);
-            break;
+    // ── Watchdog anti-gel (2-c) ──────────────────────────────────────────
+    // Phantom peut se figer indéfiniment quand son litellm attend une réponse
+    // amont qui ne viendra jamais (pool à sec, file d'attente interne du pont,
+    // requête maintenue sans fin). Un agent vivant émet au moins un octet
+    // régulièrement : au-delà de 8 min SANS AUCUNE sortie stdout/stderr, on
+    // tue l'arborescence (kill-tree de proc.ts) et on échoue avec diagnostic.
+    const STALL_LIMIT_MS = 8 * 60_000;
+    const STALL_CHECK_MS = 30_000;
+    let lastActivity = Date.now();
+    let stallKilled = false;
+    // runStreaming n'accepte qu'un signal : le watchdog ET l'opérateur passent
+    // par stallCtrl (abort opérateur propagé, kill-tree identique).
+    const stallCtrl = new AbortController();
+    const propagateCancel = (): void => stallCtrl.abort();
+    if (ctx.signal.aborted) propagateCancel();
+    else ctx.signal.addEventListener("abort", propagateCancel, { once: true });
+    const stallTimer = setInterval(() => {
+      if (Date.now() - lastActivity <= STALL_LIMIT_MS) return;
+      stallKilled = true;
+      stallCtrl.abort();
+    }, STALL_CHECK_MS);
+    stallTimer.unref();
+
+    let result;
+    try {
+      result = await runStreaming({
+        cmd: REAL_EXEC.phantomBin,
+        args: ["scan", "-t", target.value, "-m", mode, "--non-interactive", "--json"],
+        cwd: ctx.workdir,
+        timeoutMs: REAL_EXEC.timeoutMinutes * 60_000,
+        signal: stallCtrl.signal,
+        // Ligne NON tronquée à 2000 : le JSON final contient des champs
+        // (poc_script_code, evidence…) bien plus longs — la troncature
+        // corrompait le JSON et perdait TOUS les constats. L'affichage reste
+        // tronqué côté onLog (voir onLine ci-dessous).
+        maxLineLength: MAX_LINE_LENGTH_HARD,
+        // Activité brute (chunks) pour le watchdog — même sans ligne complète.
+        onActivity: () => {
+          lastActivity = Date.now();
+        },
+        env: {
+          // LLM via LiteLLM — pont Z.ai ou endpoint OpenAI-compatible direct
+          PHANTOM_LLM: REAL_EXEC.phantomLlm,
+          LLM_API_KEY: REAL_EXEC.llmApiKey,
+          LLM_API_BASE: REAL_EXEC.llmApiBase,
+          PHANTOM_SCAN_MODE: mode,
+          PYTHONUNBUFFERED: "1",
+          // les scans Phantom créent leur dossier de runs dans le cwd
+          PHANTOM_TELEMETRY: "false",
+          // Sandbox Kali éventuellement enrichie (PHANTOM_IMAGE, voir env.ts).
+          // Transmission EXPLICITE obligatoire : sanitizedEnv() (audit m7)
+          // ne forward que l'allowlist système vers les CLI d'audit — sans
+          // cette ligne, phantom ignore l'env du conteneur moteur et retombe
+          // sur son image amont. Chaîne vide exclue : Config.get() retournerait
+          // "" (falsy) → phantom lèverait « PHANTOM_IMAGE must be configured ».
+          ...(REAL_EXEC.phantomImage ? { PHANTOM_IMAGE: REAL_EXEC.phantomImage } : {}),
+          // Compresseur mémoire (voir env.ts) : sans cette ligne, phantom
+          // retombe sur son défaut amont « DeepSeek-V3.2 » (sans préfixe
+          // provider) → « LLM Provider NOT provided » à chaque compression.
+          ...(REAL_EXEC.phantomCompressorLlm
+            ? { PHANTOM_COMPRESSOR_LLM: REAL_EXEC.phantomCompressorLlm }
+            : {}),
+        },
+        onLine: async (line, isErr) => {
+          if (!line.trim()) return;
+          // stdoutAll conserve la ligne ENTIÈRE (parsing du JSON final) ;
+          // la journalisation affiche une version tronquée (hygiène m7).
+          stdoutAll = (stdoutAll + line + "\n").slice(-400_000); // fenêtre glissante
+          await ctx.onLog(
+            line.length > 2000 ? line.slice(0, 2000) + "…" : line,
+            isErr ? "WARN" : "TOOL",
+            "phantom",
+          );
+          for (const [re, phase, pct] of phasePatterns) {
+            if (phase !== lastPhase && re.test(line)) {
+              lastPhase = phase;
+              await ctx.onPhase(phase, pct);
+              break;
+            }
           }
-        }
-      },
-    });
+        },
+      });
+    } finally {
+      clearInterval(stallTimer);
+      ctx.signal.removeEventListener("abort", propagateCancel);
+    }
+
+    // Gel détecté par le watchdog → échec immédiat avec état du pool (2-c) —
+    // JAMAIS un « 0 vulnérabilité » ou un « JSON illisible » trompeur.
+    if (stallKilled) {
+      const tail = stdoutAll.trimEnd().slice(-600).replace(/\s+/g, " ");
+      const poolSummary = await fetchPoolSummary();
+      throw new Error(
+        `PHANTOM gelé (aucune sortie depuis ${Math.round(STALL_LIMIT_MS / 60_000)} min) — processus tué. ` +
+          `Dernière sortie : ${tail || "(vide)"}. ${poolSummary}`,
+      );
+    }
 
     if (result.timedOut) throw new Error("Scan Phantom : timeout global atteint");
 
@@ -435,25 +527,46 @@ export class PhantomAdapter implements RealToolAdapter {
           "phantom",
         );
       } else if (result.exitCode !== 0) {
-        // Diagnostic embarqué dans l'erreur : lignes d'erreur réelles de
-        // phantom (traceback/exception), queue de sortie, état du run-dir.
-        // Les lignes TOOL peuvent avoir été perdues par le flush batch
-        // (contention SQLite) — l'erreur survit, elle, en base.
-        const interesting = stdoutAll
-          .split("\n")
-          .filter((l) => /traceback|exception|critical|\berror\b|failed/i.test(l) && !/pydantic|UserWarning/i.test(l))
-          .slice(-3)
+        // Diagnostic HONNÊTE embarqué dans l'erreur (2-c) : lignes d'erreur
+        // réelles de phantom — y compris codes HTTP amont (400/402/403), refus
+        // modèle et quotas. L'ancienne exclusion /pydantic|UserWarning/i est
+        // SUPPRIMÉE : l'avertissement utile côtoie souvent l'erreur sur la
+        // même ligne, et un traceback Python commence par « Traceback » puis
+        // contient des lignes UserWarning — filtrer perdait la preuve.
+        const lines = stdoutAll.split("\n");
+        const DIAG_LINE_RE =
+          /traceback|exception|critical|\berror\b|failed|refus|quota|balance|billing|exhausted|pool/i;
+        const HTTP_CODE_RE = /\b[45]\d{2}\b/;
+        const interesting = lines
+          .filter((l) => DIAG_LINE_RE.test(l) || HTTP_CODE_RE.test(l))
+          .slice(-5)
           .map((l) => l.trim().slice(0, 200));
         const tail = stdoutAll.trimEnd().slice(-800).replace(/\s+/g, " ");
         const runsDir = join(ctx.workdir, "phantom_runs");
         const runsList = existsSync(runsDir)
           ? readdirSync(runsDir).slice(0, 5).join(",") || "(vide)"
           : "(absent)";
+        // « Cause probable » déduite UNIQUEMENT des preuves de la sortie —
+        // jamais devinée au-delà.
+        let probable: string;
+        if (
+          /i (?:can'?t|cannot|won'?t|am unable)|cannot provide|refus|status["']?\s*:\s*["']?refused/i.test(stdoutAll)
+        ) {
+          probable = "refus sémantique du modèle (filtre fournisseur — 200 mais tâche refusée)";
+        } else if (/\b402\b|quota|balance|billing|exhausted/i.test(stdoutAll)) {
+          probable = "quota/solde LLM épuisés sur les upstreams (cf. erreurs amont)";
+        } else if (HTTP_CODE_RE.test(stdoutAll) || /pool à sec/i.test(stdoutAll)) {
+          probable = "upstreams LLM en erreur HTTP / pool saturé (cf. erreurs amont)";
+        } else {
+          probable = "indéterminée — cf. sortie et état du pool ci-dessous";
+        }
+        const poolSummary = await fetchPoolSummary();
         throw new Error(
-          `Phantom a terminé avec le code ${result.exitCode} et aucun constat exploitable ` +
-            `(JSON final ${parsed ? "absent" : "illisible"}, phantom_runs: ${runsList})` +
-            `${interesting.length ? ` — erreurs : ${interesting.join(" | ")}` : ""}` +
-            `${tail ? ` — sortie : …${tail}` : " — sortie vide"}`,
+          `Phantom a terminé avec le code ${result.exitCode} sans rapport exploitable ` +
+            `(JSON final ${parsed ? "présent mais inutilisable" : "absent/illisible"}, phantom_runs: ${runsList}). ` +
+            `Cause probable : ${probable}. ${poolSummary}.` +
+            `${interesting.length ? ` Erreurs repérées : ${interesting.join(" | ")}.` : ""}` +
+            `${tail ? ` Sortie : …${tail}` : " Sortie vide."}`,
         );
       }
     }

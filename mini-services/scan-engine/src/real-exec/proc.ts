@@ -108,6 +108,12 @@ export interface RunStreamingOptions {
   maxLineLength?: number;
   /** Appelé pour chaque ligne émise (stdout et stderr). */
   onLine: (line: string, isErr: boolean) => void | Promise<void>;
+  /**
+   * 2-c — Appelé à CHAQUE chunk stdout/stderr (avant découpage en lignes).
+   * Sert d'événement d'activité aux watchdogs anti-gel (phantom) : un agent
+   * qui « réfléchit » sans émettre de ligne complète reste néanmoins actif.
+   */
+  onActivity?: () => void;
 }
 
 export interface RunStreamingResult {
@@ -260,10 +266,12 @@ export async function runStreaming(opts: RunStreamingOptions): Promise<RunStream
     const outDone = (async () => {
       child.stdout?.setEncoding("utf8");
       child.stdout?.on("data", (chunk: string) => {
+        opts.onActivity?.();
         void stdoutBuf.push(chunk, (line) => opts.onLine(line, false));
       });
       child.stderr?.setEncoding("utf8");
       child.stderr?.on("data", (chunk: string) => {
+        opts.onActivity?.();
         void stderrBuf.push(chunk, (line) => opts.onLine(line, true));
       });
     })();

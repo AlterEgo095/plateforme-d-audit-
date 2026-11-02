@@ -330,6 +330,24 @@ export function makeArsenalAdapter(spec: ArsenalSpec): RealToolAdapter {
           `Parsing du rapport ${spec.tool} impossible : ${err instanceof Error ? err.message : String(err)}`,
         );
       }
+      // Garde-fou anti « 0 constat silencieux » : un outil dont le rapport
+      // attendu (-o) n'a PAS été écrit alors que le code de sortie est 0 a
+      // crashé silencieusement après avoir affiché du succès (ex. semgrep
+      // sans accès au registre de règles) — déclarer « 0 constat » serait
+      // un faux négatif total. Les outils à reportPath écrivent toujours
+      // leur fichier, même avec 0 résultat.
+      if (
+        findings.length === 0 &&
+        result.exitCode === 0 &&
+        reportPath &&
+        !existsSync(reportPath)
+      ) {
+        throw new Error(
+          `${spec.tool} a terminé (code 0) sans écrire son rapport attendu (${reportPath}) — ` +
+            "exécution incomplète, résultat non exploitable. Vérifiez l'accès réseau du moteur " +
+            "(registre de règles/config) et la commande, puis relancez.",
+        );
+      }
       findings = capFindings(findings, spec.cap, `${spec.tool} : sortie tronquée`);
 
       // Tolérance : plusieurs outils sortent non-zéro sur des résultats partiels.
@@ -342,7 +360,7 @@ export function makeArsenalAdapter(spec: ArsenalSpec): RealToolAdapter {
           .join(" ⏎ ")
           .slice(0, 400);
         throw new Error(
-          `${spec.tool} a terminé avec le code ${result.exitCode} sans constat exploitable (cible injoignable ?)${tail ? ` — sortie : ${tail}` : ""}`,
+          `${spec.tool} a terminé avec le code ${result.exitCode} sans constat exploitable${tail ? ` — sortie : ${tail}` : ""}`,
         );
       }
       await ctx.onLog(
@@ -1041,11 +1059,11 @@ const semgrepSpec: ArsenalSpec = {
     const reportPath = join(ctx.workdir, "semgrep.json");
     return {
       args: [
-        "scan", "--config", REAL_EXEC.semgrepConfig, "--json", "--quiet",
+        "scan", "--config", REAL_EXEC.semgrepConfig, "--metrics=off", "--json", "--quiet",
         "-o", reportPath, dir.value,
       ],
       reportPath,
-      cmdLabel: `semgrep scan --config ${REAL_EXEC.semgrepConfig} --json -o semgrep.json ${dir.cloned ? "(dépôt cloné)" : dir.value}`,
+      cmdLabel: `semgrep scan --config ${REAL_EXEC.semgrepConfig} --metrics=off --json -o semgrep.json ${dir.cloned ? "(dépôt cloné)" : dir.value}`,
     };
   },
   async parse({ reportPath, ctx }) {
@@ -1067,7 +1085,11 @@ const semgrepSpec: ArsenalSpec = {
         const path = absPath.startsWith(repoRoot) ? absPath.slice(repoRoot.length) : absPath;
         const line = typeof start.line === "number" ? start.line : null;
         const sevMap: Record<string, RealFinding["severity"]> = {
-          ERROR: "HIGH", WARNING: "MEDIUM", INFO: "LOW",
+          // Sévérités legacy (ERROR/WARNING/INFO) ET modernes (HIGH/CRITICAL/
+          // MEDIUM/LOW — semgrep supply-chain/au-diapason) : les non couvertes
+          // tombaient en LOW et sous-estimaient les constats critiques.
+          ERROR: "HIGH", CRITICAL: "CRITICAL", HIGH: "HIGH",
+          MEDIUM: "MEDIUM", WARNING: "MEDIUM", LOW: "LOW", INFO: "LOW",
         };
         const cwe = typeof meta.cwe === "string" ? meta.cwe : undefined;
         const cveRaw = meta.cve;

@@ -18,7 +18,12 @@
 
 import { REAL_EXEC } from "./env";
 import { prepareTarget } from "./git-target";
-import { MAX_LINE_LENGTH_HARD, probeVersion, runStreaming } from "./proc";
+import {
+  describeProbeFailure,
+  MAX_LINE_LENGTH_HARD,
+  probeBinaryWithRetry,
+  runStreaming,
+} from "./proc";
 import { fetchPoolSummary, probeLlmCapacity, probeLlmEndpoint, stripLlmProvider } from "./llm-probe";
 import type {
   RealAdapterContext,
@@ -85,6 +90,40 @@ function extractJsonOutput(stdoutTail: string): Record<string, unknown> | null {
  * reconstruits depuis ces fichiers — robustes par construction.
  * ───────────────────────────────────────────────────────────────────────*/
 
+/**
+ * Découpe un contenu CSV en enregistrements en respectant les cellules
+ * quotées — qui peuvent contenir des SAUTS DE LIGNE (descriptions/PoC
+ * multi-lignes de phantom). L'ancien split(/\r?\n/) naïf cassait ces
+ * cellules, désalignait les colonnes (titre ↔ sévérité) et perdait des
+ * constats lors de la récupération depuis le répertoire de run.
+ */
+function splitCsvRecords(content: string): string[] {
+  const records: string[] = [];
+  let cur = "";
+  let inQuotes = false;
+  for (let i = 0; i < content.length; i++) {
+    const c = content[i];
+    if (inQuotes) {
+      if (c === '"') {
+        if (content[i + 1] === '"') {
+          cur += '""';
+          i++;
+        } else inQuotes = false;
+      }
+      cur += c;
+    } else if (c === '"') {
+      inQuotes = true;
+      cur += c;
+    } else if (c === "\n" || (c === "\r" && content[i + 1] === "\n")) {
+      records.push(cur);
+      cur = "";
+      if (c === "\r") i++;
+    } else cur += c;
+  }
+  if (cur.trim()) records.push(cur);
+  return records;
+}
+
 /** Éclate une ligne CSV en cellules (guillemets doublés gérés). */
 function splitCsvLine(line: string): string[] {
   const out: string[] = [];
@@ -136,42 +175,51 @@ function findingsFromRunDir(workdir: string): RealFinding[] {
   const fromCsv = (runDir: string): RealFinding[] => {
     const csvPath = join(runDir, "vulnerabilities.csv");
     if (!existsSync(csvPath)) return [];
-    const lines = readFileSync(csvPath, "utf8")
-      .split(/\r?\n/)
-      .filter((l) => l.trim());
+    // splitCsvRecords respecte les cellules quotées multi-lignes (l'ancien
+    // split(/\r?\n/) désalignait les colonnes des descriptions longues).
+    const lines = splitCsvRecords(readFileSync(csvPath, "utf8")).filter((l) => l.trim());
     if (lines.length < 2) return [];
     const header = splitCsvLine(lines[0]).map((h) => h.trim());
     const out: RealFinding[] = [];
     for (const line of lines.slice(1)) {
-      const cells = splitCsvLine(line);
-      const row: Record<string, string> = {};
-      header.forEach((h, i) => {
-        row[h] = (cells[i] ?? "").trim();
-      });
-      const mdPath = row.file ? join(runDir, row.file) : "";
-      const md = mdPath && existsSync(mdPath) ? readFileSync(mdPath, "utf8") : "";
-      const confidence = mapRunDirConfidence(row.confidence);
-      const cvssTxt = row.cvss || mdMeta(md, "CVSS");
-      const cvss = cvssTxt ? Number.parseFloat(cvssTxt) : NaN;
-      const locBits = [row.method, `${row.target ?? ""}${row.endpoint ?? ""}`].filter(Boolean);
-      const param = row.parameter ? ` (paramètre : ${row.parameter})` : "";
-      const description =
-        [mdSection(md, "Description"), mdSection(md, "Impact")].filter(Boolean).join("\n\n") ||
-        "(description disponible dans le rapport markdown du run)";
-      out.push({
-        title: row.title || row.id || "Constat Phantom",
-        severity: mapSeverity(row.severity || mdMeta(md, "Severity")),
-        confidence,
-        category: mdMeta(md, "CWE") || "web",
-        cve: null,
-        cvss: Number.isFinite(cvss) ? cvss : null,
-        location: locBits.length ? locBits.join(" ") + param : undefined,
-        description,
-        evidence: mdSection(md, "Technical Analysis") || "(aucune preuve détaillée fournie par l'outil)",
-        poc: mdSection(md, "Proof of Concept") || undefined,
-        sentinelTriggered: confidence === "CONFIRMED",
-        remediation: mdSection(md, "Remediation") || mdSection(md, "Remédiation") || undefined,
-      });
+      // Résilience par ligne : une entrée corrompue ne doit pas abandonner
+      // TOUT le CSV du run (l'ancien try/catch global renvoyait []).
+      try {
+        const cells = splitCsvLine(line);
+        const row: Record<string, string> = {};
+        header.forEach((h, i) => {
+          row[h] = (cells[i] ?? "").trim();
+        });
+        const mdPath = row.file ? join(runDir, row.file) : "";
+        const md = mdPath && existsSync(mdPath) ? readFileSync(mdPath, "utf8") : "";
+        const confidence = mapRunDirConfidence(row.confidence);
+        const cvssTxt = row.cvss || mdMeta(md, "CVSS");
+        const cvss = cvssTxt ? Number.parseFloat(cvssTxt) : NaN;
+        const locBits = [row.method, `${row.target ?? ""}${row.endpoint ?? ""}`].filter(Boolean);
+        const param = row.parameter ? ` (paramètre : ${row.parameter})` : "";
+        const description =
+          [mdSection(md, "Description"), mdSection(md, "Impact")].filter(Boolean).join("\n\n") ||
+          "(description disponible dans le rapport markdown du run)";
+        out.push({
+          title: row.title || row.id || "Constat Phantom",
+          severity: mapSeverity(row.severity || mdMeta(md, "Severity")),
+          confidence,
+          category: mdMeta(md, "CWE") || "web",
+          cve: null,
+          cvss: Number.isFinite(cvss) ? cvss : null,
+          location: locBits.length ? locBits.join(" ") + param : undefined,
+          description,
+          evidence: mdSection(md, "Technical Analysis") || "(aucune preuve détaillée fournie par l'outil)",
+          poc: mdSection(md, "Proof of Concept") || undefined,
+          sentinelTriggered: confidence === "CONFIRMED",
+          remediation: mdSection(md, "Remediation") || mdSection(md, "Remédiation") || undefined,
+        });
+      } catch (err) {
+        console.warn(
+          "[real-exec/phantom] ligne CSV illisible ignorée:",
+          err instanceof Error ? err.message : err,
+        );
+      }
     }
     return out;
   };
@@ -211,19 +259,29 @@ function findingsFromRunDir(workdir: string): RealFinding[] {
     return out;
   };
 
-  try {
-    const runsDir = join(workdir, "phantom_runs");
-    if (!existsSync(runsDir)) return [];
-    const findings: RealFinding[] = [];
-    for (const run of readdirSync(runsDir)) {
+  // Résilience : l'ancien try/catch GLOBAL autour de la boucle faisait
+  // tout-ou-rien — une seule entrée non-répertoire ou un readdirSync en
+  // erreur abandonnait TOUTE la récupération (return []) et perdait les
+  // constats d'un scan de 50 min malgré le mécanisme de secours. Désormais
+  // chaque run est isolé : un run illisible est ignoré (journalisé), les
+  // autres sont récupérés.
+  const runsDir = join(workdir, "phantom_runs");
+  if (!existsSync(runsDir)) return [];
+  const findings: RealFinding[] = [];
+  for (const run of readdirSync(runsDir)) {
+    try {
       const runDir = join(runsDir, run);
-      findings.push(...fromCsv(runDir));
-      if (findings.length === 0) findings.push(...fromMd(runDir));
+      const csvFindings = fromCsv(runDir);
+      if (csvFindings.length > 0) findings.push(...csvFindings);
+      else findings.push(...fromMd(runDir));
+    } catch (err) {
+      console.warn(
+        `[real-exec/phantom] run illisible ignoré (${run}):`,
+        err instanceof Error ? err.message : err,
+      );
     }
-    return findings;
-  } catch {
-    return [];
   }
+  return findings;
 }
 
 /**
@@ -254,19 +312,28 @@ export class PhantomAdapter implements RealToolAdapter {
   readonly tool = "PHANTOM" as const;
 
   async checkAvailable(): Promise<RealAvailability> {
-    const version = await probeVersion(REAL_EXEC.phantomBin);
-    if (!version) {
+    // Symétrique du correctif semgrep (arsenal.ts) : phantom est un CLI
+    // python lourd à froid (imports) — la sonde probeVersion (8 s, 1 essai)
+    // le faisait passer pour « binaire introuvable » et basculer en
+    // SIMULATION à tort en mode auto. probeBinaryWithRetry : timeout 30 s
+    // + 1 retry après 2 s sur timeout, causes DISTINCTES (ENOENT ≠ timeout
+    // ≠ code de sortie) pour une indisponibilité honnête.
+    const probed = await probeBinaryWithRetry(REAL_EXEC.phantomBin, 30_000);
+    if (probed.status !== "ok") {
       return {
         available: false,
-        reason: "binaire `phantom` introuvable (installer : pip install phantom-agent)",
+        reason:
+          describeProbeFailure(REAL_EXEC.phantomBin, probed) +
+          (probed.status === "missing" ? " (installer : pip install phantom-agent)" : ""),
       };
     }
-    // Docker requis (sandbox Kali éphémère) — vérification best effort.
-    const docker = await probeVersion("docker");
-    if (!docker) {
+    const version = probed.version;
+    // Docker requis (sandbox Kali éphémère) — sonde structurée avec retry.
+    const docker = await probeBinaryWithRetry("docker", 10_000);
+    if (docker.status !== "ok") {
       return {
         available: false,
-        reason: "Docker requis pour la sandbox Kali de Phantom (docker indisponible)",
+        reason: describeProbeFailure("docker", docker) + " — Docker requis pour la sandbox Kali de Phantom",
         version,
       };
     }

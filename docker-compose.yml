@@ -101,6 +101,10 @@ services:
       LLM_API_BASE: ${LLM_API_BASE:-https://api.z.ai/api/paas/v4}
       LLM_API_KEY: ${LLM_API_KEY:-}
       PHANTOM_LLM: ${PHANTOM_LLM:-openai/glm-4.6}
+      # Compresseur mémoire de phantom (symétrique prod — sans cette ligne,
+      # le défaut amont « DeepSeek-V3.2 » sans préfixe provider déclenche
+      # « LLM Provider NOT provided » à chaque compression de contexte).
+      PHANTOM_COMPRESSOR_LLM: ${PHANTOM_COMPRESSOR_LLM:-}
       BASALT_MODEL: ${BASALT_MODEL:-glm-4.6}
       # Sandbox Kali enrichie (outils supplémentaires — voir Dockerfile.sandbox).
       # Vide = image amont ghcr.io/usta0x001/phantom-sandbox:latest.

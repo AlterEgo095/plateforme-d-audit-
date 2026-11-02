@@ -26,7 +26,7 @@ export async function probeLlmEndpoint(opts: {
   model: string;
   timeoutMs?: number;
 }): Promise<LlmProbeResult> {
-  const { apiKey, apiBase, model, timeoutMs = 12_000 } = opts;
+  const { apiKey, apiBase, model, timeoutMs = 30_000 } = opts;
   if (!apiKey) {
     return { ok: false, reason: "LLM_API_KEY non configurée (agent IA — impossible de raisonner)" };
   }
@@ -55,9 +55,19 @@ export async function probeLlmEndpoint(opts: {
     }
     return { ok: false, reason: `endpoint LLM ${base} en erreur (HTTP ${res.status})` };
   } catch (err) {
+    const msg = err instanceof Error ? err.message : "erreur réseau";
+    // Distinguer TIMEOUT (signal AbortSignal.timeout — l'amont répond trop
+    // lentement : cascade d'upstreams défaillants du pont avant son 503) d'un
+    // VRAI échec réseau (DNS/refus). L'ancien message unique « injoignable »
+    // était trompeur : le pont répond, c'est son amont qui ne répond pas.
+    const isTimeout =
+      (err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError")) ||
+      /timed?\s*out/i.test(msg);
     return {
       ok: false,
-      reason: `endpoint LLM ${base} injoignable (${err instanceof Error ? err.message : "erreur réseau"})`,
+      reason: isTimeout
+        ? `endpoint LLM ${base} silencieux (aucune réponse après ${Math.round(timeoutMs / 1000)} s) — amont lent ou pool en cascade d'erreurs (cf. GET /v1/pool et POST /v1/pool/refresh)`
+        : `endpoint LLM ${base} injoignable (${msg})`,
     };
   }
 }

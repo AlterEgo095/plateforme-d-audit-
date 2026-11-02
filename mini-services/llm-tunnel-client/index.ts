@@ -35,8 +35,8 @@ const MAX_BODY_BYTES = 4 * 1024 * 1024;
  * passe donc par une file SÉQUENTIELLE avec espacement minimum, et les 429
  * sont rejoués en backoff (voir RETRY_DELAYS) — transparent pour l'agent.
  */
-const MIN_INTERVAL_MS = Number(process.env.AF_TUNNEL_MIN_INTERVAL_MS ?? 3500);
-const RETRY_DELAYS = [5_000, 10_000, 20_000, 40_000];
+const MIN_INTERVAL_MS = Number(process.env.AF_TUNNEL_MIN_INTERVAL_MS ?? 10_000);
+const RETRY_DELAYS = [20_000, 40_000, 80_000];
 
 if (!TUNNEL_TOKEN) {
   console.error("[tunnel-client] TUNNEL_TOKEN manquant — refuse de démarrer (jeton public interdit)");
@@ -268,9 +268,11 @@ function connect(): void {
       });
   };
 
-  sock.onclose = () => {
+  sock.onclose = (ev: CloseEvent) => {
     if (myGen !== generation) return; // socket obsolète — la plus récente règne
-    console.warn(`[tunnel-client] WS fermée — reconnexion dans ${Math.round(backoffMs / 1000)} s`);
+    console.warn(
+      `[tunnel-client] WS fermée (code=${ev.code}${ev.reason ? `, raison="${ev.reason}"` : ""}) — reconnexion dans ${Math.round(backoffMs / 1000)} s`,
+    );
     if (heartbeat) {
       clearInterval(heartbeat);
       heartbeat = null;

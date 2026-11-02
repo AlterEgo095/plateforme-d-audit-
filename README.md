@@ -15,7 +15,7 @@
 | **Scans en temps réel** | Progression et phase en direct, **terminal de logs streaming** (socket.io), annulation en cours, durées et compteurs |
 | **Vulnérabilités** | Consolidation multi-outils, sévérité / confiance / CVSS / CVE, preuves et PoC, statut de qualification (Ouvert → Confirmé / Faux positif / Corrigé), recherche et filtres |
 | **Rapports** | Document d'audit formel généré par scan (synthèse exécutive, groupement par sévérité, remédiations), **export PDF via impression** |
-| **Sécurité de la plateforme** | RBAC 3 rôles, sessions signées HMAC-SHA256 (cookie httpOnly), **MFA** (code de démo statique sur les comptes de démo uniquement), rate limiting sur la connexion, en-têtes de sécurité HTTP (CSP…), journal d'audit immuable |
+| **Sécurité de la plateforme** | RBAC 3 rôles, sessions signées HMAC-SHA256 (cookie httpOnly), socle MFA TOTP (enrôlement à venir), rate limiting (connexion + API mutantes), vérification d'Origine anti-CSRF, plafond de taille des requêtes, en-têtes de sécurité HTTP (CSP durcie…), journal d'audit immuable |
 | **Multi-outils** | 4 plateformes/agents IA avec phases, logs et constats propres à chaque outil ; sentinelles de vérification (PoC exécuté en sandbox sans réseau) |
 | **Arsenal evergreen (P5)** | **11 outils durables intégrés** — recon : Subfinder, Amass, httpx · DAST : Nuclei (12k templates), Nikto, OWASP ZAP · SAST/SCA : Semgrep, Trivy, Gitleaks (--redact) · exploitation : sqlmap, ffuf. **Presets « Stratégie Evergreen »** en un clic, **chaînes d'outils séquentielles** (recon → DAST → exploitation), **export/push DefectDojo**, plafonds anti-flood, secrets jamais persistés |
 | **Endurance (P4)** | **File d'attente moteur** — une campagne à 4 outils démarre toujours même au-delà du plafond de scans simultanés (dispatch FIFO à chaque libération, annulable en file) ; scans en file **qui survivent aux redémarrages** ; métriques moteur enrichies (queue, uptime, mémoire) |
@@ -230,13 +230,15 @@ bun run dev
 
 | Identifiant | Mot de passe | Rôle | Notes |
 |---|---|---|---|
-| `admin` | `Admin123!` | **ADMIN** | MFA activée — code de démo STATIQUE : `123456` |
-| `auditeur` | `Audit123!` | **AUDITOR** | Création / lancement / annulation / qualification |
-| `observateur` | `View123!` | **VIEWER** | Lecture seule |
+| `admin` | `Admin123!` | **ADMIN** | DÉVELOPPEMENT UNIQUEMENT — sans MFA |
+| `auditeur` | `Audit123!` | **AUDITOR** | DÉVELOPPEMENT UNIQUEMENT — création / lancement / annulation / qualification |
+| `observateur` | `View123!` | **VIEWER** | DÉVELOPPEMENT UNIQUEMENT — lecture seule |
 
-> 🔐 Le « TOTP » des comptes de démo est un code fixe (`123456`) — suffisant
-> pour la démonstration, à ne JAMAIS activer en production. Le compte d'amorçage
-> (`ADMIN_USERNAME`/`ADMIN_PASSWORD`) est créé **sans** MFA.
+> 🔐 Ces identifiants ne fonctionnent qu'en développement local (`DEMO_SEED=1`)
+> et ne sont **plus affichés dans l'interface** de connexion (durcissement suite
+> audit externe). En production, seul le compte d'amorçage
+> (`ADMIN_USERNAME`/`ADMIN_PASSWORD`) est créé — **sans** MFA. Aucun code TOTP
+> de démonstration n'existe (le socle `src/lib/totp.ts` attend l'enrôlement).
 
 ### Permissions par rôle
 
@@ -335,11 +337,13 @@ Chaque tentative de sauvegarde (succès **ou** échec) écrit `last-backup.json`
 ## 🔐 Sécurité implémentée
 
 - **Authentification** : mots de passe hachés **scrypt** (salt aléatoire, comparaison à temps constant), sessions `v1.<payload>.<signature>` HMAC-SHA256, cookie `httpOnly` + `SameSite=Lax` (+ `Secure` automatique dès que le site est servi en HTTPS — détection `X-Forwarded-Proto`, override `COOKIE_SECURE`), expiration 8 h.
-- **MFA** sur le compte de démo admin (code statique `123456` — démonstration uniquement ; les comptes d'amorçage production sont créés sans MFA).
+- **MFA** : socle TOTP RFC 6238 présent (`src/lib/totp.ts`) — l'enrôlement n'est pas encore disponible ; tout compte `mfaEnabled` sans secret enrôlé est refusé en échec fermé (403) — aucune backdoor.
 - **En-têtes de sécurité HTTP** : CSP, `X-Frame-Options: DENY`, `nosniff`, `Referrer-Policy`, `Permissions-Policy`, HSTS (appliquée automatiquement en HTTPS) — posés sur toutes les routes par `next.config.ts`.
 - **Validation stricte des cibles** : schéma par type (URL `http(s)://…`, GIT `https://|ssh://|git@…`, NETWORK alphanumérique) — empêche l'injection d'options/transport (`ext::`, `-upload-pack`…) dans les CLI du moteur, vérifiée côté app ET côté moteur (défense en profondeur).
 - **Environnement minimal des outils réels** : les CLI d'audit (et leurs conteneurs) reçoivent une allowlist de variables — jamais `AUTH_SECRET`, `ENGINE_INTERNAL_TOKEN` ni les clés LLM inutiles.
-- **Rate limiting** de la connexion : 5 échecs / 10 min par IP + identifiant (fenêtre glissante), avec réinitialisation au succès.
+- **Rate limiting** : (1) connexion — 5 échecs / 10 min par IP + identifiant (fenêtre glissante), réinitialisation au succès ; (2) **générique API** — 120 requêtes/min/IP sur toutes les méthodes mutantes (POST/PUT/PATCH/DELETE), `Retry-After` en 429.
+- **Anti-CSRF** : vérification de l'en-tête `Origin` sur toutes les requêtes mutantes (hôte tiers → 403) ; cookie de session `SameSite=Lax` en seconde barrière.
+- **Plafond de taille des requêtes** : `content-length` > 2 Mo (override `AF_MAX_BODY_BYTES`) → 413, avant tout parsing applicatif (s'ajoute au `client_max_body_size` de nginx).
 - **RBAC** serveur sur **tous** les endpoints (VIEWER / AUDITOR / ADMIN) + validations d'entrée **Zod** systématiques.
 - **Token interne** `x-internal-token` exigé par chaque route `/internal/*` du moteur (les API d'orchestration ne sont pas exposées publiquement).
 - **Socket.io authentifié au handshake** : cookie de session **ou** token signé (`GET /api/auth/socket-token`), rooms plafonnées (20/socket).
@@ -363,7 +367,7 @@ Authentification par cookie de session (`af_session`). Erreurs uniformes `{ "err
 
 | Méthode | Endpoint | Rôle min. | Description |
 |---|---|---|---|
-| `POST` | `/api/auth/login` | — | Connexion (`428` si MFA requise) |
+| `POST` | `/api/auth/login` | — | Connexion (`403` si compte MFA sans secret enrôlé) |
 | `POST` | `/api/auth/logout` | — | Déconnexion |
 | `GET` | `/api/auth/me` | — | Session courante |
 | `GET` | `/api/auth/socket-token` | — | Token signé pour le handshake socket.io |

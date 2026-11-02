@@ -1,13 +1,22 @@
 import type { NextConfig } from "next";
 
 // M3 (audit 8-a) : en-têtes de sécurité HTTP pour l'exposition publique VPS.
-// - CSP tolérante aux contraintes Next.js (scripts inline d'hydratation, eval
-//   en dev Turbopack) et à socket.io (ws/wss same-origin via la gateway).
+// - CSP tolérante aux contraintes Next.js (scripts inline d'hydratation) et à
+//   socket.io (ws/wss same-origin via la gateway).
+// - 'unsafe-eval' est REQUISE par Turbopack en DÉVELOPPEMENT uniquement ; elle
+//   est retirée en production (durcissement suite audit externe — un XSS ne
+//   doit pas pouvoir escalader vers eval/Function).
 // - HSTS : ignorée sur HTTP simple, appliquée automatiquement dès que le site
 //   est servi en HTTPS (Caddy + SITE_DOMAIN).
+const isDev = process.env.NODE_ENV !== "production";
+
+const scriptSrc = isDev
+  ? "script-src 'self' 'unsafe-inline' 'unsafe-eval'"
+  : "script-src 'self' 'unsafe-inline'";
+
 const CSP = [
   "default-src 'self'",
-  "script-src 'self' 'unsafe-inline' 'unsafe-eval'",
+  scriptSrc,
   "style-src 'self' 'unsafe-inline'",
   "img-src 'self' data: blob:",
   "font-src 'self' data:",
@@ -30,6 +39,12 @@ const securityHeaders = [
   { key: "Strict-Transport-Security", value: "max-age=31536000; includeSubDomains" },
 ];
 
+// Durcissement cache (audit externe) : Next.js pose s-maxage=31536000 sur les
+// pages prerendues — trop agressif pour du HTML applicatif (une correction sur
+// /legal ne se propagerait pas pendant un an côté CDN). On borne le cache CDN
+// à 10 minutes tout en gardant le bénéfice de la mise en cache.
+const HTML_CACHE = [{ key: "Cache-Control", value: "public, max-age=0, s-maxage=600" }];
+
 const nextConfig: NextConfig = {
   output: "standalone",
   reactStrictMode: false,
@@ -40,6 +55,14 @@ const nextConfig: NextConfig = {
       {
         source: "/(.*)",
         headers: securityHeaders,
+      },
+      {
+        source: "/",
+        headers: HTML_CACHE,
+      },
+      {
+        source: "/legal",
+        headers: HTML_CACHE,
       },
     ];
   },

@@ -95,6 +95,10 @@ function Carousel({
 
   React.useEffect(() => {
     if (!api) return
+    // Synchronisation initiale avec le système externe (embla) — pattern stock
+    // shadcn/ui : l'appel déclenche setState via le callback onSelect, c'est
+    // voulu (état dérivé du carrousel au montage + abonnement aux événements).
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     onSelect(api)
     api.on("reInit", onSelect)
     api.on("select", onSelect)

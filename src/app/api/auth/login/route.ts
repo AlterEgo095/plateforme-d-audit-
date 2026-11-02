@@ -7,7 +7,7 @@
  * - timing attack : si l'utilisateur est inconnu, le mot de passe est tout de même
  *   confronté à un hash scrypt factice avant le 401 (coût équivalent) ;
  * - F-06 : IP cliente réelle — cf-connecting-ip (Cloudflare) sinon DERNIER élément
- *   de x-forwarded-for (posé par notre proxy) sinon 'local' ;
+ *   de x-forwarded-for (posé par notre proxy) sinon 'local' (src/lib/client-ip.ts) ;
  * - F-05 : plus de code TOTP de démonstration. Le champ `totp` fourni est accepté
  *   puis ignoré ; un compte mfaEnabled sans secret enrôlé est refusé (403).
  */
@@ -20,6 +20,7 @@ import { ensureSeed } from '@/lib/seed'
 import { toUserDTO } from '@/lib/dto'
 import { isLoginBlocked, registerLoginFailure, resetLoginFailures } from '@/lib/rate-limit'
 import { withApi } from '@/lib/route-handler'
+import { clientIp } from '@/lib/client-ip'
 
 export const dynamic = 'force-dynamic'
 
@@ -46,25 +47,6 @@ function burnDummyVerify(password: string): void {
   } catch {
     // ignoré : seul le coût de calcul compte
   }
-}
-
-/**
- * F-06 : IP cliente à indexer dans le rate-limit.
- * 1. `cf-connecting-ip` — posé par Cloudflare (production), non falsifiable
- *    côté client ;
- * 2. sinon le DERNIER élément de `x-forwarded-for` : c'est l'IP ajoutée par le
- *    proxy de confiance le plus proche de nous (le PREMIER élément est celui du
- *    client et peut être usurpé pour contourner le blocage par IP) ;
- * 3. sinon 'local' (accès direct en développement).
- */
-function clientIp(req: NextRequest): string {
-  const cf = req.headers.get('cf-connecting-ip')?.trim()
-  if (cf) return cf
-  const xff = (req.headers.get('x-forwarded-for') ?? '')
-    .split(',')
-    .map((s) => s.trim())
-    .filter(Boolean)
-  return xff[xff.length - 1] ?? 'local'
 }
 
 export const POST = withApi(async (req: NextRequest) => {

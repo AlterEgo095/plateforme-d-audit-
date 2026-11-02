@@ -281,10 +281,18 @@ export function AppShell({
       <footer className="mt-auto border-t md:pl-60 print:hidden">
         <div className="text-muted-foreground mx-auto flex w-full max-w-7xl flex-col gap-1 px-4 py-4 text-xs sm:flex-row sm:items-center sm:justify-between">
           <p>AuditForge v1.0 — Plateforme d&apos;audit unifiée auto-hébergée</p>
-          <p className="sm:text-right">
-            Exécution réelle ou simulation selon la configuration du moteur
-            (TOOL_EXECUTION_MODE).
-          </p>
+          <div className="flex flex-col gap-1 sm:items-end">
+            <p className="sm:text-right">
+              Exécution réelle ou simulation selon la configuration du moteur
+              (TOOL_EXECUTION_MODE).
+            </p>
+            <a
+              href="/legal"
+              className="hover:text-foreground underline-offset-4 transition-colors hover:underline sm:text-right"
+            >
+              Mentions légales · Politique de confidentialité
+            </a>
+          </div>
         </div>
       </footer>
     </div>

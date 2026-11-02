@@ -2,6 +2,10 @@
 
 /**
  * AuditForge — Écran de connexion (identifiant / mot de passe / TOTP MFA).
+ *
+ * RGPD/sécurité (audit externe) : AUCUN identifiant de démonstration n'est
+ * affiché ni embarqué dans le bundle — les comptes de démo n'existent qu'en
+ * développement local (DEMO_SEED=1) et ne sont plus documentés dans l'UI.
  */
 
 import { useState } from "react";
@@ -30,16 +34,9 @@ import {
 } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Separator } from "@/components/ui/separator";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { apiPost, ApiError, getErrorMessage } from "@/lib/api-client";
 import type { UserDTO } from "@/lib/types";
-
-const DEMO_ACCOUNTS = [
-  { username: "admin", password: "Admin123!", role: "Administrateur" },
-  { username: "auditeur", password: "Audit123!", role: "Auditeur" },
-  { username: "observateur", password: "View123!", role: "Observateur" },
-];
 
 export function LoginScreen({ onLogin }: { onLogin: (user: UserDTO) => void }) {
   const [username, setUsername] = useState("");
@@ -119,7 +116,7 @@ export function LoginScreen({ onLogin }: { onLogin: (user: UserDTO) => void }) {
                     id="username"
                     className="pl-9"
                     autoComplete="username"
-                    placeholder="ex. auditeur"
+                    placeholder="Votre identifiant"
                     value={username}
                     onChange={(e) => setUsername(e.target.value)}
                     required
@@ -199,37 +196,14 @@ export function LoginScreen({ onLogin }: { onLogin: (user: UserDTO) => void }) {
             </form>
           )}
 
-          <Separator />
-
-          <div className="space-y-2">
-            <p className="text-muted-foreground text-center text-xs font-medium uppercase tracking-wide">
-              Comptes de démonstration
-            </p>
-            <div
-              className="flex flex-wrap justify-center gap-2"
-              role="group"
-              aria-label="Comptes de démonstration"
+          <p className="text-muted-foreground text-center text-xs">
+            <a
+              href="/legal"
+              className="hover:text-foreground underline-offset-4 transition-colors hover:underline"
             >
-              {DEMO_ACCOUNTS.map((acc) => (
-                <button
-                  key={acc.username}
-                  type="button"
-                  className="hover:bg-accent hover:text-accent-foreground inline-flex min-h-11 sm:min-h-9 items-center gap-1.5 rounded-full border px-3 py-1.5 text-xs transition-colors"
-                  aria-label={`Remplir les identifiants du compte ${acc.role}`}
-                  onClick={() => {
-                    setUsername(acc.username);
-                    setPassword(acc.password);
-                    setMfaRequired(false);
-                    setTotp("");
-                    setError(null);
-                  }}
-                >
-                  <span className="font-semibold">{acc.username}</span>
-                  <span className="text-muted-foreground">· {acc.role}</span>
-                </button>
-              ))}
-            </div>
-          </div>
+              Mentions légales &amp; politique de confidentialité
+            </a>
+          </p>
         </CardContent>
       </Card>
     </main>

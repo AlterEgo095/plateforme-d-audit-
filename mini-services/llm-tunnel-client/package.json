@@ -1,0 +1,12 @@
+{
+  "name": "llm-tunnel-client",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "bun --hot index.ts",
+    "start": "bun index.ts"
+  },
+  "dependencies": {
+    "z-ai-web-dev-sdk": "*"
+  }
+}

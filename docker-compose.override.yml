@@ -1,0 +1,25 @@
+# ── AuditForge — services additionnels (override docker compose) ────────────
+# Ajouté SANS toucher à docker-compose.yml (le VPS a des adaptations locales).
+# Le tunnel LLM n'expose AUCUN port : accès interne uniquement
+#   Caddy       → reverse_proxy /llm-tunnel-ws*  llm-tunnel:3032
+#   llm-bridge  → upstream « sandbox » http://llm-tunnel:3032/v1
+services:
+  llm-tunnel:
+    image: node:22-alpine
+    container_name: auditforge-llm-tunnel-1
+    restart: unless-stopped
+    working_dir: /app
+    volumes:
+      - ./mini-services/llm-tunnel-server:/app:ro
+    environment:
+      TUNNEL_TOKEN: ${TUNNEL_TOKEN:-}
+      LLM_TUNNEL_KEY: ${LLM_TUNNEL_KEY:-}
+      AF_TUNNEL_MODELS: ${AF_TUNNEL_MODELS:-glm-4.6,glm-4.5-flash}
+      AF_TUNNEL_REQ_TIMEOUT_MS: ${AF_TUNNEL_REQ_TIMEOUT_MS:-240000}
+    command: ["node", "index.mjs"]
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3032/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s

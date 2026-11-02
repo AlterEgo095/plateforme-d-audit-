@@ -1057,13 +1057,17 @@ const semgrepSpec: ArsenalSpec = {
   async build(ctx) {
     const dir = await prepareTarget(ctx);
     const reportPath = join(ctx.workdir, "semgrep.json");
+    // « --metrics=off » est REFUSÉ par semgrep quand « --config auto » est
+    // utilisé (« Cannot create auto config when metrics are off » — le
+    // registre de règles exige la télémétrie). Télémétrie désactivée
+    // SEULEMENT pour une config explicite (règles locales/pack épinglé).
+    const config = REAL_EXEC.semgrepConfig;
+    const args = ["scan", "--config", config, "--json", "--quiet", "-o", reportPath, dir.value];
+    if (config !== "auto") args.splice(3, 0, "--metrics=off");
     return {
-      args: [
-        "scan", "--config", REAL_EXEC.semgrepConfig, "--metrics=off", "--json", "--quiet",
-        "-o", reportPath, dir.value,
-      ],
+      args,
       reportPath,
-      cmdLabel: `semgrep scan --config ${REAL_EXEC.semgrepConfig} --metrics=off --json -o semgrep.json ${dir.cloned ? "(dépôt cloné)" : dir.value}`,
+      cmdLabel: `semgrep scan --config ${config}${config !== "auto" ? " --metrics=off" : ""} --json -o semgrep.json ${dir.cloned ? "(dépôt cloné)" : dir.value}`,
     };
   },
   async parse({ reportPath, ctx }) {

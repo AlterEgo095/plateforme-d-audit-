@@ -26,7 +26,7 @@ export async function probeLlmEndpoint(opts: {
   model: string;
   timeoutMs?: number;
 }): Promise<LlmProbeResult> {
-  const { apiKey, apiBase, model, timeoutMs = 30_000 } = opts;
+  const { apiKey, apiBase, model, timeoutMs = 45_000 } = opts;
   if (!apiKey) {
     return { ok: false, reason: "LLM_API_KEY non configurée (agent IA — impossible de raisonner)" };
   }

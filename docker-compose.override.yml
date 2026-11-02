@@ -23,3 +23,9 @@ services:
       timeout: 5s
       retries: 3
       start_period: 10s
+
+  # Accélération du balayage du pool : 45 s (défaut) → 10 s. L'attente entre
+  # deux balayages dépassait la sonde LLM du moteur (30 s) → « silencieux ».
+  llm-bridge:
+    environment:
+      AF_POOL_WAIT_MS: "10000"

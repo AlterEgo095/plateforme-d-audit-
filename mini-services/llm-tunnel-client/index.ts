@@ -29,6 +29,14 @@ const TUNNEL_TOKEN = process.env.TUNNEL_TOKEN ?? "";
 const RATE_PER_MIN = Number(process.env.AF_TUNNEL_CLIENT_RATE ?? 30);
 const MAX_MESSAGES = Number(process.env.AF_TUNNEL_MAX_MESSAGES ?? 60);
 const MAX_BODY_BYTES = 4 * 1024 * 1024;
+/**
+ * Anti-burst : la plateforme Z.ai rate-limite le SDK (429 « Too many
+ * requests ») dès que l'agent enchaîne les appels en rafale. Toute requête
+ * passe donc par une file SÉQUENTIELLE avec espacement minimum, et les 429
+ * sont rejoués en backoff (voir RETRY_DELAYS) — transparent pour l'agent.
+ */
+const MIN_INTERVAL_MS = Number(process.env.AF_TUNNEL_MIN_INTERVAL_MS ?? 3500);
+const RETRY_DELAYS = [5_000, 10_000, 20_000, 40_000];
 
 if (!TUNNEL_TOKEN) {
   console.error("[tunnel-client] TUNNEL_TOKEN manquant — refuse de démarrer (jeton public interdit)");
@@ -44,6 +52,23 @@ let zai: Awaited<ReturnType<typeof ZAI.create>> | null = null;
 async function getZai() {
   if (!zai) zai = await ZAI.create();
   return zai;
+}
+
+// ── File séquentielle + espacement minimum entre appels SDK ─────────────────
+let queueTail: Promise<void> = Promise.resolve();
+let lastCallAt = 0;
+function enqueue<T>(fn: () => Promise<T>): Promise<T> {
+  const run = queueTail.then(async () => {
+    const wait = Math.max(0, lastCallAt + MIN_INTERVAL_MS - Date.now());
+    if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+    lastCallAt = Date.now();
+    return fn();
+  });
+  queueTail = run.then(
+    () => undefined,
+    () => undefined,
+  );
+  return run;
 }
 
 // ── Rate limit local (fenêtre glissante 60 s, compteur simple) ──────────────
@@ -77,14 +102,37 @@ async function handleChat(body: Record<string, unknown>): Promise<TunnelResponse
   }
   const thinkingType =
     (body.thinking as { type?: string } | undefined)?.type === "enabled" ? "enabled" : "disabled";
+  const sdkMessages = toSdkMessages(msgs);
+  const promptChars = sdkMessages.reduce((a, m) => a + m.content.length, 0);
   const t0 = Date.now();
+
+  // Appel SDK via la file séquentielle + retry backoff sur 429 (rate limit
+  // plateforme Z.ai) — l'agent ne voit jamais l'échec transitoire.
   const z = await getZai();
-  const completion = await z.chat.completions.create({
-    messages: toSdkMessages(msgs),
-    thinking: { type: thinkingType } as { type: "enabled" | "disabled" },
-  });
+  let completion: Awaited<ReturnType<typeof z.chat.completions.create>> | null = null;
+  for (let attempt = 0; ; attempt++) {
+    try {
+      completion = await enqueue(() =>
+        z.chat.completions.create({
+          messages: sdkMessages,
+          thinking: { type: thinkingType } as { type: "enabled" | "disabled" },
+        }),
+      );
+      break;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (attempt < RETRY_DELAYS.length && /429|too many requests/i.test(msg)) {
+        console.warn(
+          `[tunnel-client] 429 SDK — retry dans ${RETRY_DELAYS[attempt] / 1000} s (essai ${attempt + 1}/${RETRY_DELAYS.length + 1})`,
+        );
+        await new Promise((r) => setTimeout(r, RETRY_DELAYS[attempt]));
+        continue;
+      }
+      throw err;
+    }
+  }
+
   const content = completion?.choices?.[0]?.message?.content ?? "";
-  const promptChars = toSdkMessages(msgs).reduce((a, m) => a + m.content.length, 0);
   const out = {
     id: `chatcmpl-tunnel-${crypto.randomUUID()}`,
     object: "chat.completion",
@@ -134,32 +182,59 @@ async function handle(req: TunnelRequest): Promise<TunnelResponse> {
 }
 
 // ── Connexion WS sortante + reconnexion exponentielle ───────────────────────
+// GARDE DE GÉNÉRATION : une seule connexion vivante à la fois. Les handlers
+// d'une socket obsolète (fermée par remplacement/nettoyage) ne relancent PAS
+// de reconnexion — sinon chaque close déclenche un connect concurrent et les
+// sockets se remplacent mutuellement en boucle (oscillation observée).
+let generation = 0;
 let backoffMs = 2_000;
 let ws: WebSocket | null = null;
 let heartbeat: ReturnType<typeof setInterval> | null = null;
 let lastPong = 0;
 
+function scheduleReconnect(): void {
+  const myGen = generation;
+  setTimeout(() => {
+    if (myGen === generation) connect();
+  }, backoffMs);
+}
+
 function connect(): void {
+  generation++;
+  const myGen = generation;
+  // Nettoyer toute socket résiduelle SANS déclencher ses handlers.
+  if (ws) {
+    ws.onclose = null;
+    ws.onerror = null;
+    ws.onmessage = null;
+    try { ws.close(); } catch { /* */ }
+  }
+  if (heartbeat) {
+    clearInterval(heartbeat);
+    heartbeat = null;
+  }
   const url = TUNNEL_URL + "?token=" + encodeURIComponent(TUNNEL_TOKEN);
   console.log(`[tunnel-client] connexion vers ${TUNNEL_URL}…`);
-  ws = new WebSocket(url);
+  const sock = new WebSocket(url);
+  ws = sock;
 
-  ws.onopen = () => {
+  sock.onopen = () => {
+    if (myGen !== generation) return;
     backoffMs = 2_000;
     lastPong = Date.now();
     console.log("[tunnel-client] TUNNEL ÉTABLI — ressources IA du sandbox offertes au VPS");
-    if (heartbeat) clearInterval(heartbeat);
     heartbeat = setInterval(() => {
       if (Date.now() - lastPong > 120_000) {
         console.warn("[tunnel-client] pong absent > 120 s — reconnexion");
-        try { ws?.close(); } catch { /* */ }
+        try { sock.close(); } catch { /* */ }
         return;
       }
-      try { ws?.send(JSON.stringify({ type: "ping" })); } catch { /* */ }
+      try { sock.send(JSON.stringify({ type: "ping" })); } catch { /* */ }
     }, 30_000);
   };
 
-  ws.onmessage = (ev: MessageEvent) => {
+  sock.onmessage = (ev: MessageEvent) => {
+    if (myGen !== generation) return;
     let m: TunnelRequest & { type?: string };
     try {
       m = JSON.parse(typeof ev.data === "string" ? ev.data : String(ev.data));
@@ -181,27 +256,33 @@ function connect(): void {
     // Répondre de façon asynchrone — jamais bloqué par d'autres requêtes.
     handle(m)
       .then((resp) => {
-        try { ws?.send(JSON.stringify({ id: m.id, status: resp.status, body: resp.body })); } catch { /* */ }
+        if (myGen !== generation) return;
+        try { sock.send(JSON.stringify({ id: m.id, status: resp.status, body: resp.body })); } catch { /* */ }
       })
       .catch((err) => {
         const msg = err instanceof Error ? err.message : String(err);
+        if (myGen !== generation) return;
         try {
-          ws?.send(JSON.stringify({ id: m.id, status: 500, body: { error: { message: msg.slice(0, 300) } } }));
+          sock.send(JSON.stringify({ id: m.id, status: 500, body: { error: { message: msg.slice(0, 300) } } }));
         } catch { /* */ }
       });
   };
 
-  ws.onclose = () => {
-    if (heartbeat) clearInterval(heartbeat);
+  sock.onclose = () => {
+    if (myGen !== generation) return; // socket obsolète — la plus récente règne
     console.warn(`[tunnel-client] WS fermée — reconnexion dans ${Math.round(backoffMs / 1000)} s`);
-    setTimeout(connect, backoffMs);
+    if (heartbeat) {
+      clearInterval(heartbeat);
+      heartbeat = null;
+    }
+    scheduleReconnect();
     backoffMs = Math.min(backoffMs * 2, 60_000);
   };
 
-  ws.onerror = () => {
-    try { ws?.close(); } catch { /* */ }
+  sock.onerror = () => {
+    try { sock.close(); } catch { /* */ }
   };
 }
 
 connect();
-console.log(`[tunnel-client] démarré — rate=${RATE_PER_MIN}/min, max_messages=${MAX_MESSAGES}`);
+console.log(`[tunnel-client] démarré — rate=${RATE_PER_MIN}/min, max_messages=${MAX_MESSAGES}, espacement=${MIN_INTERVAL_MS} ms`);

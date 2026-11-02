@@ -52,7 +52,12 @@ const log = (m) => console.log(`[llm-tunnel] ${m}`);
 // ── État tunnel ──────────────────────────────────────────────────────────────
 let tunnelSocket = null;
 let tunnelId = null;
+let lastTunnelMessage = Date.now();
 const pending = new Map();
+
+// Watchdog anti-socket-fantôme : le client heartbeat toutes les 30 s — au-delà
+// de 150 s SANS aucun message, la socket est fermée (son « close » côté client
+// peut ne jamais être détecté par le serveur, ex. après un reload du process).
 
 // ── Serveur HTTP ─────────────────────────────────────────────────────────────
 const server = http.createServer((req, res) => {
@@ -188,14 +193,43 @@ async function handleChat(req, res) {
   }
 
   if (wantStream) {
-    // SSE simulé : completion complète en un chunk + [DONE] — les clients
-    // OpenAI/litellm parsent ce flux comme un vrai stream à 1 événement.
+    // SSE au format STREAM OpenAI réel : litellm/OpenAI clients attendent des
+    // chunks avec choices[0].delta — l'ancienne simulation émettait un objet
+    // non-stream (choices[0].message) dans le flux → litellm parsait delta,
+    // trouvait vide → content='' → l'agent croyait à un refus du modèle.
+    // On découpe donc la completion complète du sandbox en chunks conformes.
+    const b = (reply.body && typeof reply.body === "object") ? reply.body : {};
+    const chunkBase = {
+      id: b.id || `chatcmpl-tunnel-${crypto.randomUUID()}`,
+      object: "chat.completion.chunk",
+      created: b.created || Math.floor(Date.now() / 1000),
+      model: b.model || "glm-4.6",
+    };
+    const content =
+      (b.choices && b.choices[0] && b.choices[0].message && typeof b.choices[0].message.content === "string")
+        ? b.choices[0].message.content
+        : "";
     res.writeHead(200, {
       "Content-Type": "text/event-stream; charset=utf-8",
       "Cache-Control": "no-cache",
       Connection: "keep-alive",
     });
-    res.write(`data: ${JSON.stringify(reply.body)}\n\n`);
+    // Chunk 1 : delta role+content (la completion entière en un delta —
+    // conforme au protocole : le client concatène les delta.content).
+    res.write(
+      `data: ${JSON.stringify({
+        ...chunkBase,
+        choices: [{ index: 0, delta: { role: "assistant", content }, finish_reason: null }],
+      })}\n\n`,
+    );
+    // Chunk 2 : delta vide + finish_reason stop.
+    res.write(
+      `data: ${JSON.stringify({
+        ...chunkBase,
+        choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+        usage: b.usage || undefined,
+      })}\n\n`,
+    );
     res.write("data: [DONE]\n\n");
     res.end();
   } else {
@@ -223,11 +257,22 @@ server.on("upgrade", (req, socket, head) => {
     return;
   }
   if (tunnelSocket && tunnelSocket.readyState === 1) {
-    // Un tunnel actif à la fois : le nouveau est refusé, l'ancien reste maître
-    // (le client reconnecté retentera après que l'ancienne socket aura expiré).
-    socket.write("HTTP/1.1 409 Conflict\r\n\r\n");
-    socket.destroy();
-    return;
+    // REMPLACEMENT AUTOMATIQUE : un nouveau client authentifié prend la main.
+    // (L'ancien refus 409 créait une boucle de reconnexion quand le client
+    // se rechargait — la socket fantôme ne libérait jamais la place.)
+    log("tunnel existant REMPLACÉ par une nouvelle connexion authentifiée");
+    try {
+      tunnelSocket.close(4000, "replaced");
+    } catch {
+      /* */
+    }
+    tunnelSocket = null;
+    // Échouer immédiatement les requêtes en attente sur l'ancien tunnel.
+    for (const [id, p] of pending) {
+      clearTimeout(p.timer);
+      pending.delete(id);
+      p.resolve({ status: 503, body: { error: { message: "tunnel remplacé — requête non servie", type: "tunnel_down" } } });
+    }
   }
   wss.handleUpgrade(req, socket, head, (ws) => wss.emit("connection", ws, req));
 });
@@ -235,10 +280,12 @@ server.on("upgrade", (req, socket, head) => {
 wss.on("connection", (ws) => {
   tunnelSocket = ws;
   tunnelId = crypto.randomUUID().slice(0, 8);
+  lastTunnelMessage = Date.now();
   log(`tunnel client CONNECTÉ (${tunnelId}) — IA sandbox disponible`);
   ws.send(JSON.stringify({ type: "hello", models: MODELS }));
 
   ws.on("message", (raw) => {
+    lastTunnelMessage = Date.now();
     let m;
     try {
       m = JSON.parse(raw.toString());
@@ -281,4 +328,15 @@ server.listen(PORT, "0.0.0.0", () => {
   if (!TUNNEL_TOKEN || !HTTP_KEY) {
     log("⚠️ TUNNEL_TOKEN ou LLM_TUNNEL_KEY manquant — les accès correspondants seront refusés");
   }
+  setInterval(() => {
+    if (tunnelSocket && Date.now() - lastTunnelMessage > 150_000) {
+      log("watchdog : tunnel silencieux > 150 s — fermeture forcée (socket fantôme ?)");
+      try {
+        tunnelSocket.close(4001, "watchdog");
+      } catch {
+        /* */
+      }
+      tunnelSocket = null;
+    }
+  }, 30_000).unref();
 });

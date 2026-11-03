@@ -7,6 +7,7 @@
 
 import { useState } from "react";
 import {
+  Briefcase,
   Bug,
   Crosshair,
   FileText,
@@ -33,6 +34,7 @@ export type View =
   | "scans"
   | "findings"
   | "reports"
+  | "cases"
   | "tools"
   | "audit";
 
@@ -42,6 +44,7 @@ export const VIEW_TITLES: Record<View, string> = {
   scans: "Scans",
   findings: "Vulnérabilités",
   reports: "Rapports",
+  cases: "Dossiers",
   tools: "Outils",
   audit: "Journal d'audit",
 };
@@ -52,6 +55,7 @@ const NAV_ITEMS: { view: View; label: string; icon: LucideIcon }[] = [
   { view: "scans", label: "Scans", icon: Radar },
   { view: "findings", label: "Vulnérabilités", icon: Bug },
   { view: "reports", label: "Rapports", icon: FileText },
+  { view: "cases", label: "Dossiers", icon: Briefcase },
   { view: "tools", label: "Outils", icon: Wrench },
   { view: "audit", label: "Journal d'audit", icon: ScrollText },
 ];

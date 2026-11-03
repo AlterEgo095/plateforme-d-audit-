@@ -10,6 +10,7 @@ import { ShieldCheck } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type {
   CampaignStatus,
+  CaseStatus,
   Confidence,
   FindingStatus,
   ScanStatus,
@@ -192,6 +193,66 @@ export function SimulationBadge({ className }: { className?: string }) {
         aria-hidden
       />
       SIMULATION
+    </span>
+  );
+}
+
+// ─── Sprint 2 : statut de dossier client (Case) ─────────────────────
+
+export const CASE_STATUS_LABELS: Record<CaseStatus, string> = {
+  OPEN: "Ouvert",
+  AUTHORIZED: "Autorisé",
+  RUNNING: "En cours",
+  REPORTED: "Rapport généré",
+  CLOSED: "Clôturé",
+};
+
+/**
+ * Couleurs de statut dossier — zinc (ouvert), émeraude (autorisé), ambre
+ * (en cours), teal (rapport généré), rose foncé atténué (clôturé).
+ * Jamais de bleu/indigo (contrat palette AuditForge).
+ */
+export function caseStatusColor(status: CaseStatus): string {
+  switch (status) {
+    case "OPEN":
+      return "#a1a1aa"; // zinc-400
+    case "AUTHORIZED":
+      return "#34d399"; // émeraude
+    case "RUNNING":
+      return "#fbbf24"; // ambre
+    case "REPORTED":
+      return "#2dd4bf"; // teal
+    case "CLOSED":
+      return "#be123c"; // rose-700 — foncé/atténué
+  }
+}
+
+export function CaseStatusBadge({
+  status,
+  className,
+}: {
+  status: CaseStatus;
+  className?: string;
+}) {
+  const color = caseStatusColor(status);
+  return (
+    <span
+      className={cn(
+        "inline-flex items-center gap-1.5 rounded-md border px-2 py-0.5 text-xs font-medium whitespace-nowrap",
+        className
+      )}
+      style={{
+        backgroundColor: `${color}1a`,
+        color,
+        borderColor: `${color}55`,
+      }}
+    >
+      <span
+        className="size-1.5 rounded-full"
+        style={{ backgroundColor: color }}
+        aria-hidden
+      />
+      {CASE_STATUS_LABELS[status] ?? status}
     </span>
   );
 }

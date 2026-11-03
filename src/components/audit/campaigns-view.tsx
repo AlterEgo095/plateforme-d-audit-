@@ -7,6 +7,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  Braces,
   Crosshair,
   FileDown,
   GitBranch,
@@ -20,6 +21,7 @@ import {
   Trash2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
 import {
   Card,
   CardContent,
@@ -83,6 +85,7 @@ import {
 } from "@/components/audit/status-badges";
 import type {
   CampaignDTO,
+  CaseDTO,
   Profile,
   TargetType,
   Tool,
@@ -382,7 +385,18 @@ function CampaignCard({
     <Card className="flex flex-col gap-0 overflow-hidden">
       <CardHeader className="space-y-2 pb-3">
         <div className="flex flex-wrap items-start justify-between gap-2">
-          <CardTitle className="text-base leading-snug">{campaign.name}</CardTitle>
+          <div className="flex min-w-0 flex-wrap items-center gap-2">
+            <CardTitle className="text-base leading-snug">{campaign.name}</CardTitle>
+            {/* Sprint 2 : dossier client rattaché (référence AF-…). */}
+            {campaign.caseReference && (
+              <Badge
+                variant="outline"
+                className="text-muted-foreground shrink-0 font-mono text-[11px] font-normal"
+              >
+                dossier {campaign.caseReference}
+              </Badge>
+            )}
+          </div>
           <ScanStatusBadge status={campaign.status} />
         </div>
         <CardDescription className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
@@ -495,6 +509,30 @@ function CampaignCard({
               <TooltipContent>Export DefectDojo (import générique)</TooltipContent>
             </Tooltip>
           </TooltipProvider>
+          {/* Sprint 2 : export SARIF 2.1.0 (GitHub Code Scanning). */}
+          <TooltipProvider delayDuration={200}>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-11 sm:h-9 flex-1 sm:flex-none"
+                  asChild
+                >
+                  <a
+                    href={`/api/reports/sarif?campaignId=${campaign.id}`}
+                    target="_blank"
+                    rel="noreferrer"
+                    aria-label={`Exporter la campagne ${campaign.name} au format SARIF`}
+                  >
+                    <Braces className="size-4" aria-hidden />
+                    SARIF
+                  </a>
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>Export SARIF 2.1.0 (GitHub Code Scanning)</TooltipContent>
+            </Tooltip>
+          </TooltipProvider>
           {campaign.sequential && (
             <span className="text-muted-foreground ml-auto text-[11px]">chaîne séquentielle</span>
           )}
@@ -543,7 +581,23 @@ function CreateCampaignDialog({
   const [tools, setTools] = useState<Tool[]>(["PHANTOM"]);
   const [sequential, setSequential] = useState(false);
   const [launchNow, setLaunchNow] = useState(true);
+  // Sprint 2 : rattachement optionnel à un dossier client.
+  const [caseId, setCaseId] = useState("");
+  const [cases, setCases] = useState<CaseDTO[]>([]);
+  const casesSeqRef = useRef(0);
   const [submitting, setSubmitting] = useState(false);
+
+  /** Sprint 2 : charge les dossiers rattachables (existants, non clôturés). */
+  const loadCases = useCallback(async () => {
+    const seq = ++casesSeqRef.current;
+    try {
+      const res = await apiGet<{ cases: CaseDTO[] }>("/api/cases");
+      if (seq !== casesSeqRef.current) return; // réponse obsolète
+      setCases(res.cases);
+    } catch {
+      // Rattachement optionnel — échec de chargement silencieux.
+    }
+  }, []);
 
   const compatibleTools = useMemo(
     () =>
@@ -589,6 +643,14 @@ function CreateCampaignDialog({
     return () => clearTimeout(t);
   }, [compatibleTools]);
 
+  // Sprint 2 : charge la liste des dossiers à l'ouverture du dialogue
+  // (différé d'un tick — annulé à la fermeture, react-hooks v6).
+  useEffect(() => {
+    if (!open) return;
+    const t = setTimeout(() => void loadCases(), 0);
+    return () => clearTimeout(t);
+  }, [open, loadCases]);
+
   const reset = () => {
     setName("");
     setDescription("");
@@ -598,6 +660,7 @@ function CreateCampaignDialog({
     setTools(["PHANTOM"]);
     setSequential(false);
     setLaunchNow(true);
+    setCaseId("");
   };
 
   const submit = async (e: React.FormEvent) => {
@@ -616,6 +679,7 @@ function CreateCampaignDialog({
         profile,
         tools,
         sequential,
+        caseId: caseId || undefined,
         launchNow,
       });
       toast({
@@ -726,6 +790,35 @@ function CreateCampaignDialog({
                 <SelectItem value="DEEP">Approfondi (~80 s)</SelectItem>
               </SelectContent>
             </Select>
+          </div>
+
+          {/* Sprint 2 : rattachement optionnel à un dossier client. */}
+          <div className="space-y-2">
+            <Label>Dossier client (rattachement)</Label>
+            <Select value={caseId} onValueChange={setCaseId}>
+              <SelectTrigger
+                className="w-full"
+                aria-label="Dossier client (rattachement)"
+              >
+                <SelectValue placeholder="Aucun dossier" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="">Aucun dossier</SelectItem>
+                {cases.map((c) => (
+                  <SelectItem
+                    key={c.id}
+                    value={c.id}
+                    disabled={c.status === "CLOSED"}
+                  >
+                    {c.reference} — {c.title}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <p className="text-muted-foreground text-xs">
+              Une campagne rattachée à un dossier client n&apos;est lancée que
+              si une autorisation signée active couvre sa cible.
+            </p>
           </div>
 
           <div className="space-y-2">

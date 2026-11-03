@@ -13,6 +13,7 @@ import { writeAudit } from '@/lib/audit'
 import { engineRun } from '@/lib/engine-client'
 import { refreshCampaignStatuses } from '@/lib/campaign-status'
 import { PROFILES, TARGET_TYPES, TOOLS, isToolCompatible, toCampaignDTO, validateTarget } from '@/lib/dto'
+import { checkLaunchAuthorization } from '@/lib/case-auth'
 import { withCampaignLock } from '@/lib/mutex'
 import { withApi } from '@/lib/route-handler'
 import type { Profile, Tool } from '@/lib/types'
@@ -32,6 +33,7 @@ export const GET = withApi(async () => {
     take: 100,
     include: {
       createdBy: { select: { username: true } },
+      case: { select: { reference: true } },
       scans: { orderBy: { createdAt: 'asc' }, take: 50 },
       _count: { select: { scans: true } },
     },
@@ -66,6 +68,9 @@ const createSchema = z.object({
   tools: z.array(z.enum(TOOLS)).min(1).max(8),
   // P5 : chaîne d'outils — exécution séquentielle (recon → DAST → exploitation).
   sequential: z.boolean().optional().default(false),
+  // Sprint 2 : rattachement optionnel à un dossier client (autorisation
+  // signée exigée au lancement — garde checkLaunchAuthorization).
+  caseId: z.string().max(64).nullable().optional(),
   launchNow: z.boolean(),
 })
 
@@ -106,6 +111,35 @@ export const POST = withApi(async (req: NextRequest) => {
     return NextResponse.json({ error: targetError }, { status: 400 })
   }
 
+  // Sprint 2 : validation du rattachement au dossier (existant, non clôturé).
+  let caseRef: string | null = null
+  if (input.caseId) {
+    const kase = await db.case.findUnique({ where: { id: input.caseId } })
+    if (!kase) {
+      return NextResponse.json({ error: 'Dossier client introuvable' }, { status: 404 })
+    }
+    if (kase.status === 'CLOSED') {
+      return NextResponse.json(
+        { error: `Dossier ${kase.reference} clôturé — rattachement impossible` },
+        { status: 409 }
+      )
+    }
+    caseRef = kase.reference
+    // Lancement immédiat : le garde d'autorisation s'applique DÈS LA CRÉATION
+    // (une attestation active couvrant l'hôte cible est requise).
+    if (input.launchNow) {
+      const authCheck = await checkLaunchAuthorization({
+        caseId: kase.id,
+        target: input.target,
+        targetType: input.targetType,
+      })
+      if (!authCheck.ok) {
+        await writeAudit(session.username, 'CAMPAIGN_CREATE_BLOCKED', kase.reference, authCheck.error)
+        return NextResponse.json({ error: authCheck.error }, { status: 403 })
+      }
+    }
+  }
+
   // Création atomique campagne + scans (§L.10) — la transaction ne contient que des écritures DB.
   const target = input.target.trim()
   const { campaign, scans } = await db.$transaction(async (tx) => {
@@ -118,6 +152,7 @@ export const POST = withApi(async (req: NextRequest) => {
         profile: input.profile,
         status: 'DRAFT',
         sequential: input.sequential,
+        ...(input.caseId ? { caseId: input.caseId } : {}),
         createdById: session.sub,
       },
     })
@@ -145,7 +180,7 @@ export const POST = withApi(async (req: NextRequest) => {
     session.username,
     'CAMPAIGN_CREATE',
     campaign.name,
-    `Cible ${campaign.target} (${campaign.profile}, ${campaign.targetType}${input.sequential ? ', chaîne séquentielle' : ''})`
+    `Cible ${campaign.target} (${campaign.profile}, ${campaign.targetType}${input.sequential ? ', chaîne séquentielle' : ''}${caseRef ? `, dossier ${caseRef}` : ''})`
   )
 
   // Lancement immédiat : appels moteur sous verrou applicatif par campagne (§L.8/§L.9)
@@ -223,6 +258,7 @@ export const POST = withApi(async (req: NextRequest) => {
     where: { id: campaign.id },
     include: {
       createdBy: { select: { username: true } },
+      case: { select: { reference: true } },
       scans: { orderBy: { createdAt: 'asc' } },
     },
   })

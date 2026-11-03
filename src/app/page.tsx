@@ -16,6 +16,7 @@ import { CampaignsView } from "@/components/audit/campaigns-view";
 import { ScansView } from "@/components/audit/scans-view";
 import { FindingsView } from "@/components/audit/findings-view";
 import { ReportsView } from "@/components/audit/reports-view";
+import { CasesView } from "@/components/audit/cases-view";
 import { ToolsView } from "@/components/audit/tools-view";
 import { AuditLogView } from "@/components/audit/audit-log-view";
 import { ScanDetail } from "@/components/audit/scan-detail";
@@ -161,6 +162,7 @@ export default function Page() {
             onConsumeReportId={() => setScanReportId(null)}
           />
         )}
+        {view === "cases" && <CasesView user={user} onOpenScans={viewScansFor} />}
         {view === "tools" && <ToolsView />}
         {view === "audit" && <AuditLogView />}
       </AppShell>

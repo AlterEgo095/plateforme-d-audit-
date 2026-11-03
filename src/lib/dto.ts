@@ -14,6 +14,9 @@ import type {
   AuditEntry,
   CampaignDTO,
   CampaignStatus,
+  CaseAuthorizationDTO,
+  CaseDTO,
+  CaseStatus,
   Confidence,
   FindingDTO,
   FindingStatus,
@@ -28,7 +31,16 @@ import type {
   Tool,
   UserDTO,
 } from '@/lib/types'
-import type { AuditTrail, Campaign, Finding, Scan, ScanLog, User } from '@prisma/client'
+import type {
+  AuditTrail,
+  Campaign,
+  Case,
+  CaseAuthorization,
+  Finding,
+  Scan,
+  ScanLog,
+  User,
+} from '@prisma/client'
 
 // ─── Énumérations autorisées (validation des filtres) ────────────────
 
@@ -54,6 +66,8 @@ export const TOOLS: Tool[] = [
 export const SCAN_STATUSES: ScanStatus[] = ['QUEUED', 'RUNNING', 'COMPLETED', 'FAILED', 'CANCELLED']
 export const TARGET_TYPES: TargetType[] = ['URL', 'GIT', 'NETWORK']
 export const PROFILES: Profile[] = ['QUICK', 'STANDARD', 'DEEP']
+/** Sprint 2 : statuts d'un dossier client (voir type CaseStatus). */
+export const CASE_STATUSES: CaseStatus[] = ['OPEN', 'AUTHORIZED', 'RUNNING', 'REPORTED', 'CLOSED']
 
 /** P5 : familles d'outils (regroupement du catalogue et de l'assistant campagne). */
 export type ToolFamily = 'AGENT' | 'RECON' | 'DAST' | 'CODE' | 'EXPLOIT'
@@ -432,6 +446,7 @@ export function toAuditDTO(a: AuditTrail): AuditEntry {
 interface CampaignLike extends Campaign {
   createdBy?: { username: string } | null
   scans?: Scan[]
+  case?: { reference: string } | null
 }
 
 /**
@@ -459,6 +474,9 @@ export function toCampaignDTO(c: CampaignLike, totals?: CampaignTotals): Campaig
     profile: c.profile as Profile,
     status: c.status as CampaignStatus,
     sequential: c.sequential ?? false,
+    // Sprint 2 : dossier client rattaché (null si campagne isolée).
+    caseId: c.caseId ?? null,
+    caseReference: c.case?.reference ?? null,
     createdAt: c.createdAt.toISOString(),
     createdById: c.createdById,
     createdByName: c.createdBy?.username ?? 'inconnu',
@@ -467,4 +485,90 @@ export function toCampaignDTO(c: CampaignLike, totals?: CampaignTotals): Campaig
     findingsCount: totals?.findingsCount ?? scans.reduce((acc, s) => acc + s.findingsCount, 0),
     criticalCount: totals?.criticalCount ?? scans.reduce((acc, s) => acc + s.criticalCount, 0),
   }
+}
+
+// ─── Sprint 2 : mappers Case / CaseAuthorization ─────────────────────
+
+export function toAuthorizationDTO(a: CaseAuthorization): CaseAuthorizationDTO {
+  return {
+    id: a.id,
+    caseId: a.caseId,
+    signatory: a.signatory,
+    signatoryRole: a.signatoryRole,
+    scope: a.scope,
+    targets: parseTargetsJson(a.targets),
+    validFrom: a.validFrom.toISOString(),
+    validUntil: a.validUntil.toISOString(),
+    signature: a.signature,
+    signedAt: a.signedAt.toISOString(),
+    revokedAt: a.revokedAt ? a.revokedAt.toISOString() : null,
+    revokedReason: a.revokedReason ?? null,
+  }
+}
+
+/** Parse sûr du JSON d'hôtes autorisés (tolérant aux valeurs corrompues). */
+function parseTargetsJson(raw: string): string[] {
+  try {
+    const parsed: unknown = JSON.parse(raw)
+    if (!Array.isArray(parsed)) return []
+    return parsed.filter((t): t is string => typeof t === 'string' && t.length > 0)
+  } catch {
+    return []
+  }
+}
+
+/** Case telle que renvoyée par Prisma avec includes optionnels. */
+export interface CaseLike extends Case {
+  createdBy?: { username: string } | null
+  authorizations?: CaseAuthorization[]
+  /** Compteurs portés par les SCANS des campagnes (pas par Campaign). */
+  campaigns?: { scans?: { findingsCount: number; criticalCount: number }[] }[]
+  _count?: { campaigns: number }
+}
+
+/**
+ * Mappe un dossier → CaseDTO. Les compteurs campagnes acceptent soit les
+ * campagnes incluses (somme JS), soit _count.campaigns pour le nombre brut.
+ * activeAuthorization = l'autorisation active la plus récente (tri signAt desc).
+ */
+export function toCaseDTO(c: CaseLike): CaseDTO {
+  const authorizations = [...(c.authorizations ?? [])].sort(
+    (a, b) => b.signedAt.getTime() - a.signedAt.getTime()
+  )
+  const active = authorizations.find((a) => isAuthorizationActive(a)) ?? null
+  const campaigns = c.campaigns ?? []
+  return {
+    id: c.id,
+    reference: c.reference,
+    title: c.title,
+    client: c.client,
+    contact: c.contact ?? null,
+    description: c.description ?? null,
+    status: c.status as CaseStatus,
+    createdAt: c.createdAt.toISOString(),
+    createdByName: c.createdBy?.username ?? 'inconnu',
+    campaignsCount: c._count?.campaigns ?? campaigns.length,
+    findingsCount: campaigns.reduce(
+      (acc, s) => acc + (s.scans ?? []).reduce((a, f) => a + f.findingsCount, 0),
+      0
+    ),
+    criticalCount: campaigns.reduce(
+      (acc, s) => acc + (s.scans ?? []).reduce((a, f) => a + f.criticalCount, 0),
+      0
+    ),
+    activeAuthorization: active ? toAuthorizationDTO(active) : null,
+  }
+}
+
+/**
+ * Autorisation ACTIVE = signée, non révoquée, dans la fenêtre de validité.
+ * Sémantique partagée entre le DTO et le garde de lancement (case-auth.ts).
+ */
+export function isAuthorizationActive(a: {
+  validFrom: Date
+  validUntil: Date
+  revokedAt: Date | null
+}): boolean {
+  const now = Date.now()
+  return a.revokedAt === null && a.validFrom.getTime() <= now && a.validUntil.getTime() >= now
 }

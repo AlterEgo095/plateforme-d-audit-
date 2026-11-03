@@ -18,6 +18,7 @@ model User {
   mfaEnabled   Boolean    @default(false)
   createdAt    DateTime   @default(now())
   campaigns    Campaign[]
+  cases        Case[]
 }
 
 model Campaign {
@@ -31,6 +32,11 @@ model Campaign {
   // P5 : exécution séquentielle (chaîne d'outils) — les scans démarrent l'un
   // après l'autre (recon → DAST → exploitation) au lieu de courir en parallèle.
   sequential  Boolean  @default(false)
+  // Sprint 2 : rattachement optionnel à un dossier client (Case) — une
+  // campagne liée à un dossier exige une autorisation signée active couvrant
+  // la cible pour pouvoir être lancée.
+  caseId      String?
+  case        Case?    @relation(fields: [caseId], references: [id], onDelete: SetNull)
   createdById String
   createdBy   User     @relation(fields: [createdById], references: [id])
   createdAt   DateTime @default(now())
@@ -38,6 +44,7 @@ model Campaign {
 
   @@index([createdById])
   @@index([createdAt])
+  @@index([caseId])
 }
 
 model Scan {
@@ -122,4 +129,62 @@ model AuditTrail {
   createdAt DateTime @default(now())
 
   @@index([createdAt])
+}
+
+// ─── Sprint 2 : dossiers client + autorisation de test ───────────────
+
+/**
+ * Case — dossier client d'audit. Regroupe des campagnes sous une référence
+ * client unique (AF-<année>-<NNN>) et porte le workflow d'autorisation :
+ * un lancement de campagne rattachée à un dossier exige une autorisation
+ * signée ACTIVE (non révoquée, période valide) couvrant la cible.
+ * Statut : OPEN (brouillon) → AUTHORIZED (autorisation signée) →
+ * RUNNING (campagne en cours) → REPORTED (rapport client généré) → CLOSED.
+ */
+model Case {
+  id           String   @id @default(cuid())
+  reference    String   @unique // AF-2025-001
+  title        String
+  client       String
+  contact      String?
+  description  String?
+  status       String   @default("OPEN")
+  createdById  String
+  createdBy    User     @relation(fields: [createdById], references: [id])
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  campaigns    Campaign[]
+  authorizations CaseAuthorization[]
+
+  @@index([status])
+  @@index([createdAt])
+  @@index([createdById])
+}
+
+/**
+ * CaseAuthorization — attestation d'autorisation de test signée par le
+ * client. Une seule autorisation ACTIVE par période : signée (signedAt),
+ * non révoquée (revokedAt null), dans la fenêtre [validFrom, validUntil].
+ * `targets` = tableau JSON d'hôtes autorisés (hôte exact ou joker *.domaine,
+ * minuscules) — PAS une liste Prisma (SQLite) : sérialisation JSON maîtrisée
+ * dans src/lib/case-auth.ts. `signature` = empreinte SHA-256 hexadécimale de
+ * l'attestation canonique (preuve d'intégrité affichée dans le rapport).
+ */
+model CaseAuthorization {
+  id            String    @id @default(cuid())
+  caseId        String
+  case          Case      @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  signatory     String
+  signatoryRole String
+  scope         String
+  targets       String // JSON array — voir ci-dessus
+  validFrom     DateTime
+  validUntil    DateTime
+  signature     String
+  signedAt      DateTime  @default(now())
+  revokedAt     DateTime?
+  revokedReason String?
+  createdAt     DateTime  @default(now())
+
+  @@index([caseId])
 }

@@ -20,6 +20,7 @@ import { requireAuth } from '@/lib/auth'
 import { writeAudit } from '@/lib/audit'
 import { engineRun } from '@/lib/engine-client'
 import { TOOLS, isToolCompatible, toCampaignDTO } from '@/lib/dto'
+import { checkLaunchAuthorization } from '@/lib/case-auth'
 import { withCampaignLock } from '@/lib/mutex'
 import { withApi } from '@/lib/route-handler'
 import type { Profile, TargetType, Tool } from '@/lib/types'
@@ -52,6 +53,19 @@ export const POST = withApi<{ id: string }>(async (req, { params }) => {
     const campaign = await db.campaign.findUnique({ where: { id } })
     if (!campaign) {
       return NextResponse.json({ error: 'Campagne introuvable' }, { status: 404 })
+    }
+
+    // Sprint 2 : garde d'autorisation — une campagne rattachée à un dossier
+    // client exige une attestation signée ACTIVE couvrant l'hôte cible.
+    const authCheck = await checkLaunchAuthorization({
+      caseId: campaign.caseId,
+      target: campaign.target,
+      targetType: campaign.targetType,
+      campaignName: campaign.name,
+    })
+    if (!authCheck.ok) {
+      await writeAudit(session.username, 'CAMPAIGN_LAUNCH_BLOCKED', campaign.name, authCheck.error)
+      return NextResponse.json({ error: authCheck.error }, { status: 403 })
     }
 
     // Compatibilité outil ⇄ type de cible de la campagne (worklog §B)
@@ -97,6 +111,13 @@ export const POST = withApi<{ id: string }>(async (req, { params }) => {
         createdScans.push(scan)
       }
       await tx.campaign.update({ where: { id }, data: { status: 'RUNNING' } })
+      // Sprint 2 : le dossier lié passe RUNNING (traçabilité du cycle de vie).
+      if (campaign.caseId) {
+        await tx.case.updateMany({
+          where: { id: campaign.caseId, status: { in: ['OPEN', 'AUTHORIZED', 'REPORTED'] } },
+          data: { status: 'RUNNING' },
+        })
+      }
       return { scans: createdScans }
     })
 
@@ -158,6 +179,7 @@ export const POST = withApi<{ id: string }>(async (req, { params }) => {
     where: { id },
     include: {
       createdBy: { select: { username: true } },
+      case: { select: { reference: true } },
       scans: { orderBy: { createdAt: 'asc' } },
     },
   })

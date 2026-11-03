@@ -52,6 +52,18 @@ export type CampaignStatus =
   | "FAILED"
   | "CANCELLED";
 
+/**
+ * Sprint 2 — statut d'un dossier client (Case) :
+ * OPEN (créé) → AUTHORIZED (autorisation signée active) → RUNNING (au moins
+ * une campagne en cours) → REPORTED (rapport client généré) → CLOSED.
+ */
+export type CaseStatus =
+  | "OPEN"
+  | "AUTHORIZED"
+  | "RUNNING"
+  | "REPORTED"
+  | "CLOSED";
+
 export type ScanStatus =
   | "QUEUED"
   | "RUNNING"
@@ -120,6 +132,12 @@ export interface CampaignDTO {
   status: CampaignStatus;
   /** P5 : chaîne d'outils — les scans s'exécutent l'un après l'autre. */
   sequential: boolean;
+  /**
+   * Sprint 2 : dossier client rattaché (optionnel) — lancement soumis à
+   * autorisation signée active couvrant la cible.
+   */
+  caseId: string | null;
+  caseReference: string | null;
   createdAt: string;
   createdById: string;
   createdByName: string;
@@ -166,6 +184,76 @@ export interface AuditEntry {
   resource: string;
   detail: string | null;
   createdAt: string;
+}
+
+// ─── Sprint 2 : dossiers client (Case) + autorisations ───────────────
+
+/** Autorisation de test signée — voir model CaseAuthorization (schéma Prisma). */
+export interface CaseAuthorizationDTO {
+  id: string;
+  caseId: string;
+  signatory: string;
+  signatoryRole: string;
+  scope: string;
+  /** Hôtes autorisés (hôte exact ou joker *.domaine, minuscules). */
+  targets: string[];
+  validFrom: string;
+  validUntil: string;
+  /** Empreinte SHA-256 de l'attestation canonique (preuve d'intégrité). */
+  signature: string;
+  signedAt: string;
+  revokedAt: string | null;
+  revokedReason: string | null;
+}
+
+export interface CaseDTO {
+  id: string;
+  /** Référence client unique — AF-<année>-<NNN>. */
+  reference: string;
+  title: string;
+  client: string;
+  contact: string | null;
+  description: string | null;
+  status: CaseStatus;
+  createdAt: string;
+  createdByName: string;
+  campaignsCount: number;
+  findingsCount: number;
+  criticalCount: number;
+  /** Autorisation active la plus récente (signée, non révoquée, période valide), sinon null. */
+  activeAuthorization: CaseAuthorizationDTO | null;
+}
+
+/** Campagne résumée dans le rapport client (scans inclus). */
+export interface CaseReportCampaign {
+  id: string;
+  name: string;
+  target: string;
+  targetType: TargetType;
+  profile: Profile;
+  status: CampaignStatus;
+  createdAt: string;
+  scans: ScanDTO[];
+}
+
+/** Rapport client agrégé — toutes les campagnes/constats du dossier. */
+export interface CaseReportDTO {
+  caseInfo: CaseDTO;
+  authorization: CaseAuthorizationDTO | null;
+  /** Historique des autorisations (actives et révoquées) — traçabilité. */
+  authorizationHistory: CaseAuthorizationDTO[];
+  campaigns: CaseReportCampaign[];
+  findings: FindingDTO[];
+  stats: {
+    total: number;
+    bySeverity: Record<Severity, number>;
+    byStatus: Record<FindingStatus, number>;
+    byTool: Record<string, number>;
+    confirmedCount: number;
+    sentinelCount: number;
+  };
+  generatedAt: string;
+  generatedBy: string;
 }
 
 export interface ToolInfo {

@@ -35,6 +35,21 @@ import { isIP } from "node:net";
 
 export type TargetGuardResult = { ok: true } | { ok: false; reason: string };
 
+/**
+ * F-04bis (symétrique de l'app — src/lib/dto.ts) : allowlist opérateur de
+ * hosts EXACTS (TARGET_HOST_ALLOWLIST, virgules, minuscules). Contexte : les
+ * fixtures de test de la plateforme (WordPress d'exercice, réflecteur XSS,
+ * dépôt git de fixtures) sont hébergées sur le VPS lui-même et joignables via
+ * sa passerelle Docker (192.168.0.1) — des adresses privées que le garde
+ * refuse par défaut. Correspondance EXACTE sur l'hôte littéral de la cible
+ * (jamais sur les adresses RÉSOLUES — un nom public qui résout privé reste
+ * refusé, l'anti-rebinding est préservé). Vide (défaut) : garde stricte.
+ */
+const OPERATOR_ALLOWLIST = (process.env.TARGET_HOST_ALLOWLIST ?? "")
+  .split(",")
+  .map((s) => s.trim().toLowerCase())
+  .filter(Boolean);
+
 export interface TargetGuardOptions {
   /**
    * Résolveur injectable (tests sans réseau) — défaut : dns lookup {all:true}.
@@ -177,8 +192,15 @@ export async function assertRemoteTargetAllowed(
     return refused("hôte interne (*.internal, inclut metadata.google.internal) — résolution interne interdite");
   }
 
+  // Allowlist opérateur (F-04bis) — match EXACT sur l'hôte littéral, après
+  // normalisation crochets IPv6. Court-circuite IP littérale ET résolution DNS.
+  const bareHost = lower.replace(/^\[/, "").replace(/\]$/, "");
+  if (OPERATOR_ALLOWLIST.includes(bareHost)) {
+    return { ok: true };
+  }
+
   // IP littérale (v4/v6, crochets IPv6 retirés) → contrôle direct, sans DNS.
-  const bare = lower.replace(/^\[/, "").replace(/\]$/, "");
+  const bare = bareHost;
   const family = isIP(bare);
   if (family === 4) {
     const v = parseIpv4(bare);

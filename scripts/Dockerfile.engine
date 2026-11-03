@@ -154,7 +154,7 @@ RUN if [ "$WITH_ARSENAL" = "1" ]; then set -eux; \
 RUN if [ "$WITH_ARSENAL" = "1" ]; then set -eux; \
       apt-get update -y \
       && apt-get install -y --no-install-recommends \
-           hydra john john-data dnsutils ruby ruby-dev build-essential \
+           hydra john john-data dnsutils bsdextrautils procps ruby ruby-dev build-essential \
       && ln -sf "$(command -v john)" /usr/local/bin/john \
       && ln -sf "$(command -v hydra)" /usr/local/bin/hydra \
       && pip install --no-cache-dir wafw00f \

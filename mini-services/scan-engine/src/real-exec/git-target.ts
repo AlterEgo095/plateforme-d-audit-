@@ -39,14 +39,37 @@ export async function prepareTarget(ctx: RealAdapterContext): Promise<PreparedTa
   assertSafeGitTarget(ctx.target);
   const dest = join(ctx.workdir, "target-repo");
   await ctx.onLog(`git clone --depth 1 ${ctx.target} → ${dest}`, "CMD", "git");
+  let stderrTail = "";
   const result = await runStreaming({
     cmd: "git",
     args: ["clone", "--depth", "1", "--single-branch", ctx.target, dest],
     signal: ctx.signal,
     timeoutMs: 5 * 60_000,
-    onLine: (line, isErr) => ctx.onLog(line, isErr ? "WARN" : "INFO", "git"),
+    onLine: (line, isErr) => {
+      if (isErr) stderrTail = `${stderrTail}\n${line}`.slice(-600);
+      ctx.onLog(line, isErr ? "WARN" : "INFO", "git");
+    },
   });
   if (result.exitCode !== 0) {
+    // Repli légitime : les dépôts servis en transport HTTP « dumb » (fichiers
+    // statiques + update-server-info — ex. serveurs de fixtures) ne supportent
+    // PAS le clonage superficiel (« dumb http transport does not support
+    // shallow capabilities »). On retente SANS --depth : dépôt plus ancien
+    // mais fidèle. Toute autre erreur reste rédhibitoire.
+    if (/dumb http transport does not support shallow/i.test(stderrTail)) {
+      await ctx.onLog("repli : transport HTTP dumb détecté — clone complet (sans --depth 1)", "INFO", "git");
+      const retry = await runStreaming({
+        cmd: "git",
+        args: ["clone", "--single-branch", ctx.target, dest],
+        signal: ctx.signal,
+        timeoutMs: 5 * 60_000,
+        onLine: (line, isErr) => ctx.onLog(line, isErr ? "WARN" : "INFO", "git"),
+      });
+      if (retry.exitCode !== 0) {
+        throw new Error(`Clonage Git impossible (code ${retry.exitCode}) : ${ctx.target}`);
+      }
+      return { value: dest, cloned: true };
+    }
     throw new Error(`Clonage Git impossible (code ${result.exitCode}) : ${ctx.target}`);
   }
   return { value: dest, cloned: true };

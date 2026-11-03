@@ -2188,7 +2188,10 @@ const johnSpec: ArsenalSpec = {
     }
     await writeFile(hashFile, [...hashLines].join("\n") + "\n", "utf8");
     await writeFile(modePath, JSON.stringify({ mode: "crack", hashes: hashLines.size }), "utf8");
-    const args = [`--wordlist=${REAL_EXEC.johnWordlist}`, "--no-log"];
+    // NB : pas d'option « --no-log » — absente du john Debian (erreur
+    // « Unknown option ») ; la verbosité par défaut est journalisée par le
+    // moteur et le parse lit les guesses live sur stdout.
+    const args = [`--wordlist=${REAL_EXEC.johnWordlist}`];
     if (ctx.profile === "DEEP") args.push("--rules"); // mangles wordlist (DEEP uniquement)
     args.push(hashFile);
     return {

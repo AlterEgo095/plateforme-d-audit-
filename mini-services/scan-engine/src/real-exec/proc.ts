@@ -13,7 +13,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { closeSync, existsSync, openSync, readFileSync, rmSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 
 /** Résout un binaire dans le PATH — retourne null si introuvable. */
@@ -247,6 +247,12 @@ function sanitizedEnv(extra?: Record<string, string>): NodeJS.ProcessEnv {
     const value = process.env[key];
     if (value !== undefined) env[key] = value;
   }
+  // HOME peut être ABSENTE du process moteur (PID 1 — `docker run` ne la
+  // déduit pas de /etc/passwd, contrairement à `docker exec`) : sans elle,
+  // wpscan ne localise plus ~/.wpscan (base de vulnérabilités) et avorte
+  // (« Update required, you can not run a scan if a database file is
+  // missing », code 4). Fallback euid → /root.
+  if (env.HOME === undefined) env.HOME = homedir();
   return extra ? { ...env, ...extra } : env;
 }
 

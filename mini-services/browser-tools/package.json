@@ -1,0 +1,9 @@
+{
+  "name": "af-browser-tools",
+  "version": "1.0.0",
+  "description": "AuditForge Sprint 3 — outils d'audit navigateur headless (CLI)",
+  "type": "module",
+  "dependencies": {
+    "playwright-core": "1.55.0"
+  }
+}

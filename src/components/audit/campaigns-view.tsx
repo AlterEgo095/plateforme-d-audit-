@@ -98,10 +98,12 @@ const TOOL_IDS = Object.keys(TOOL_META) as Tool[];
  * type de cible courant sont retenus.
  */
 const EVERGREEN_PRESETS: { id: string; label: string; tools: Tool[] }[] = [
-  { id: "recon", label: "Recon externe", tools: ["SUBFINDER", "AMASS", "HTTPX"] },
-  { id: "web", label: "Audit web complet", tools: ["NUCLEI", "ZAP", "SQLMAP", "FFUF", "NIKTO"] },
-  { id: "code", label: "Audit de code", tools: ["SEMGREP", "TRIVY", "GITLEAKS", "BASALT"] },
+  { id: "recon", label: "Recon externe", tools: ["SUBFINDER", "AMASS", "HTTPX", "WHATWEB", "WAFW00F"] },
+  { id: "web", label: "Audit web complet", tools: ["NUCLEI", "ZAP", "SQLMAP", "FFUF", "NIKTO", "DALFOX"] },
+  { id: "code", label: "Audit de code", tools: ["SEMGREP", "TRIVY", "GITLEAKS", "BASALT", "JOHN"] },
   { id: "agents", label: "Agents IA", tools: ["PHANTOM", "DEEPAUDIT", "REDAMON", "BASALT"] },
+  { id: "cms", label: "Audit CMS WordPress", tools: ["WPSCAN", "NIKTO", "NUCLEI", "WHATWEB"] },
+  { id: "tls", label: "Audit TLS & périmètre", tools: ["TESTSSL", "WAFW00F", "WHATWEB", "HYDRA"] },
 ];
 
 const TARGET_PLACEHOLDERS: Record<TargetType, string> = {

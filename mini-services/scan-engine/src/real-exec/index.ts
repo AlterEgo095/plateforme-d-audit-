@@ -13,6 +13,11 @@
  *   - SAST/SCA : SEMGREP, TRIVY, GITLEAKS ;
  *   - Exploitation : SQLMAP, FFUF.
  *
+ * Sprint 1 « élargissement » :
+ *   - DAST/CMS : WPSCAN (WordPress), DALFOX (XSS), TESTSSL (TLS) ;
+ *   - Recon : WHATWEB (empreinte web), WAFW00F (détection WAF) ;
+ *   - Exploitation : HYDRA (identifiants par défaut), JOHN (hashes faibles GIT).
+ *
  * Les plateformes distantes doivent être déclarées via les variables
  * DEEPAUDIT_API_URL / REDAMON_API_URL (voir README — section « Exécution
  * réelle »). Les binaires arsenal sont détectés dans le PATH du moteur —
@@ -48,6 +53,14 @@ const ADAPTERS: Partial<Record<Tool, () => RealToolAdapter>> = {
   GITLEAKS: () => makeArsenalAdapter(ARSENAL_SPECS.GITLEAKS),
   SQLMAP: () => makeArsenalAdapter(ARSENAL_SPECS.SQLMAP),
   FFUF: () => makeArsenalAdapter(ARSENAL_SPECS.FFUF),
+  // Sprint 1 — élargissement arsenal
+  WPSCAN: () => makeArsenalAdapter(ARSENAL_SPECS.WPSCAN),
+  DALFOX: () => makeArsenalAdapter(ARSENAL_SPECS.DALFOX),
+  WHATWEB: () => makeArsenalAdapter(ARSENAL_SPECS.WHATWEB),
+  TESTSSL: () => makeArsenalAdapter(ARSENAL_SPECS.TESTSSL),
+  WAFW00F: () => makeArsenalAdapter(ARSENAL_SPECS.WAFW00F),
+  HYDRA: () => makeArsenalAdapter(ARSENAL_SPECS.HYDRA),
+  JOHN: () => makeArsenalAdapter(ARSENAL_SPECS.JOHN),
 };
 
 /** Retourne l'adaptateur réel de l'outil, ou null si non implémenté. */

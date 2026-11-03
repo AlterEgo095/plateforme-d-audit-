@@ -261,6 +261,14 @@ const TOOL_COLORS: Record<Tool, string> = {
   GITLEAKS: "#c084fc",
   SQLMAP: "#ef4444",
   FFUF: "#facc15",
+  // Sprint 1 — élargissement arsenal
+  WPSCAN: "#22d3ee",
+  DALFOX: "#f97316",
+  WHATWEB: "#84cc16",
+  TESTSSL: "#14b8a6",
+  WAFW00F: "#d946ef",
+  HYDRA: "#f43f5e",
+  JOHN: "#78716c",
 };
 
 // M4 (audit 8-a) : les cibles supportées dérivent de TOOL_TARGET_COMPAT
@@ -368,6 +376,49 @@ export const TOOL_META: Record<
     color: TOOL_COLORS.FFUF,
     description: "Fuzzing de répertoires/paramètres",
     supportedTargets: TOOL_TARGET_COMPAT.FFUF,
+  },
+  // Sprint 1 — élargissement arsenal
+  WPSCAN: {
+    label: "WPScan",
+    color: TOOL_COLORS.WPSCAN,
+    description: "Scanner WordPress (plugins, thèmes, users, CVE)",
+    supportedTargets: TOOL_TARGET_COMPAT.WPSCAN,
+  },
+  DALFOX: {
+    label: "Dalfox",
+    color: TOOL_COLORS.DALFOX,
+    description: "Scan XSS paramétré + DOM (payloads déclenchés)",
+    supportedTargets: TOOL_TARGET_COMPAT.DALFOX,
+  },
+  WHATWEB: {
+    label: "WhatWeb",
+    color: TOOL_COLORS.WHATWEB,
+    description: "Empreinte web (1 800+ plugins)",
+    supportedTargets: TOOL_TARGET_COMPAT.WHATWEB,
+  },
+  TESTSSL: {
+    label: "testssl.sh",
+    color: TOOL_COLORS.TESTSSL,
+    description: "Audit TLS/SSL complet (protocoles, suites, cert)",
+    supportedTargets: TOOL_TARGET_COMPAT.TESTSSL,
+  },
+  WAFW00F: {
+    label: "wafw00f",
+    color: TOOL_COLORS.WAFW00F,
+    description: "Détection/identification de WAF",
+    supportedTargets: TOOL_TARGET_COMPAT.WAFW00F,
+  },
+  HYDRA: {
+    label: "hydra",
+    color: TOOL_COLORS.HYDRA,
+    description: "Identifiants par défaut SSH (liste fixe, plafonné)",
+    supportedTargets: TOOL_TARGET_COMPAT.HYDRA,
+  },
+  JOHN: {
+    label: "John the Ripper",
+    color: TOOL_COLORS.JOHN,
+    description: "Craquage de hashes faibles du dépôt (wordlist)",
+    supportedTargets: TOOL_TARGET_COMPAT.JOHN,
   },
 };
 

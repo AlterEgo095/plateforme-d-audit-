@@ -54,8 +54,8 @@ const TOOLS_STATUS_TTL_MS = 60_000; // i5 : cache du statut réel des outils (1 
 const QUEUE_KICK_MS = 30_000;
 
 /**
- * P5 : catalogue complet — 4 plateformes/agents IA + 11 outils evergreen
- * (arsenal). Synchronisé avec src/lib/dto.ts côté application.
+ * P5 + Sprint 1 : catalogue complet — 4 plateformes/agents IA + 18 outils
+ * evergreen (arsenal). Synchronisé avec src/lib/dto.ts côté application.
  */
 const TOOLS: Tool[] = [
   "PHANTOM", "DEEPAUDIT", "BASALT", "REDAMON",
@@ -63,6 +63,7 @@ const TOOLS: Tool[] = [
   "NUCLEI", "NIKTO", "ZAP",
   "SEMGREP", "TRIVY", "GITLEAKS",
   "SQLMAP", "FFUF",
+  "WPSCAN", "DALFOX", "WHATWEB", "TESTSSL", "WAFW00F", "HYDRA", "JOHN",
 ];
 const PROFILES: Profile[] = ["QUICK", "STANDARD", "DEEP"];
 const TARGET_TYPES: TargetType[] = ["URL", "GIT", "NETWORK"];

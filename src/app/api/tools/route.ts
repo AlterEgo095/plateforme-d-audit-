@@ -274,6 +274,133 @@ const TOOL_CATALOG: Omit<ToolInfo, 'status'>[] = [
     supportedTargets: [...TOOL_TARGET_COMPAT.FFUF],
     family: 'EXPLOIT',
   },
+  // ── Sprint 1 « élargissement » de l'arsenal ──
+  {
+    id: 'WPSCAN',
+    name: 'WPScan',
+    description:
+      "Le scanner WordPress de référence : énumération du cœur, des plugins, des thèmes et des utilisateurs, " +
+      "détection de versions obsolètes et de vulnérabilités documentées (base WPScan, CVE), artefacts exposés " +
+      "(xmlrpc, readme, debug.log, sauvegardes). Énumération modulée par profil (vp,vt → +users, +backups).",
+    nature: 'Scanner CMS WordPress (WPScanTeam, Ruby)',
+    integration: 'énumération vp/vt/u/cb/dbe, détection passive+agressive, sortie JSON',
+    sandbox: 'Sans sandbox — sondes HTTP standard, user-agent aléatoire, pas de brute-force de login',
+    capabilities: [
+      'Plugins/thèmes obsolètes + CVE associées',
+      'Énumération utilisateurs (REST, authors, flux)',
+      'Artefacts exposés (xmlrpc, backups, debug)',
+    ],
+    supportedTargets: [...TOOL_TARGET_COMPAT.WPSCAN],
+    family: 'DAST',
+  },
+  {
+    id: 'DALFOX',
+    name: 'Dalfox',
+    description:
+      "Moteur d'analyse XSS (hahwul, Go) : découverte de paramètres (query, body), injection de 200+ vecteurs " +
+      "contextuels avec vérification DOM par marqueurs uniques, détection de réflexions exploitables et PoC " +
+      "reproductibles. Sortie JSON enrichie (contexte d'injection, confiance, preuve URL).",
+    nature: 'Scan XSS paramétré et DOM (hahwul, Go — v3)',
+    integration: 'param mining, only-poc v/r/a, timeout par cible, deep-scan (DEEP), sortie JSON',
+    sandbox: 'Sans sandbox — injections HTTP standard, débit contenu, dedup exacte',
+    capabilities: [
+      'XSS réfléchis confirmés (payload déclenché)',
+      'Détection DOM (AST) et réflexions candidates',
+      'PoC URL reproduibles pour chaque constat',
+    ],
+    supportedTargets: [...TOOL_TARGET_COMPAT.DALFOX],
+    family: 'DAST',
+  },
+  {
+    id: 'WHATWEB',
+    name: 'WhatWeb',
+    description:
+      "Empreinte web à 1 800+ plugins (urbanadventurer, Ruby) : identifie serveur, langage, CMS, frameworks, " +
+      "librairies JS, en-têtes et versions exposées. Niveau d'agressivité modulé par profil (furtif → heavy). " +
+      "La cartographie technologique qui oriente la sélection des exploits et des templates.",
+    nature: 'Fingerprinting web (WhatWeb, Ruby)',
+    integration: '1 800+ plugins, niveaux -a 1→4, log JSON',
+    sandbox: 'Sans sandbox — requêtes HTTP standard, redirections suivies',
+    capabilities: [
+      'Identification stack complète (serveur, langage, CMS)',
+      'Détection des versions divulguées',
+      "Panels d'administration et points d'entrée",
+    ],
+    supportedTargets: [...TOOL_TARGET_COMPAT.WHATWEB],
+    family: 'RECON',
+  },
+  {
+    id: 'TESTSSL',
+    name: 'testssl.sh',
+    description:
+      "Audit TLS/SSL exhaustif (testssl.sh, Bash + openssl dédié) : protocoles (SSLv2→TLS1.3), suites de " +
+      "chiffrement, perfect forward secrecy, certificats (chaîne, SAN, expiration, révocation), vulnérabilités " +
+      "historiques (Heartbleed, CCS, ROBOT…) et en-têtes (HSTS, CSP de la couche TLS).",
+    nature: 'Audit TLS/SSL complet (testssl.sh, Bash)',
+    integration: 'openssl dédié embarqué, --jsonfile-pretty, sévérités normalisées',
+    sandbox: 'Sans sandbox — connexion TCP pure à l\'endpoint, aucune requête applicative',
+    capabilities: [
+      'Protocoles obsolètes et suites faibles (CBC/3DES)',
+      'Certificat : chaîne, SAN, expiration, révocation',
+      'Vulnérabilités TLS historiques (CVE mappées)',
+    ],
+    supportedTargets: [...TOOL_TARGET_COMPAT.TESTSSL],
+    family: 'DAST',
+  },
+  {
+    id: 'WAFW00F',
+    name: 'wafw00f',
+    description:
+      "Détection et identification de pare-feux applicatifs web (EnableSecurity, Python) : 146 empreintes " +
+      "d'éditeurs (Cloudflare, AWS WAF, ModSecurity, Akamai…) + détection générique par différences de réponses " +
+      "sur vecteurs d'attaque (XSS, SQLi, LFI, XXE, OSCI).",
+    nature: 'Détection de WAF (wafw00f, Python)',
+    integration: '146 empreintes, mode -a (tous détecteurs), export JSON',
+    sandbox: 'Sans sandbox — sondes HTTP bénignes (vecteurs non exploités)',
+    capabilities: [
+      "Identification de l'éditeur du WAF en place",
+      'Détection générique (réponses différenciées)',
+      "Signalement honnête de l'absence de WAF",
+    ],
+    supportedTargets: [...TOOL_TARGET_COMPAT.WAFW00F],
+    family: 'RECON',
+  },
+  {
+    id: 'HYDRA',
+    name: 'hydra',
+    description:
+      "Vérification d'identifiants PAR DÉFAUT sur le service SSH des hôtes audités (thc-hydra) : liste FIXE de " +
+      "14 paires courantes (root/admin/test/ubuntu…), débit plafonné (4 tâches, 10 s entre séries), arrêt au " +
+      "premier succès. Pas de brute-force générique — un contrôle ciblé de mauvaises pratiques de déploiement.",
+    nature: "Test d'identifiants par défaut (thc-hydra, C — module SSH)",
+    integration: '-C liste fixe, -t 4, -w 10, -f (stop au premier succès), rapport texte',
+    sandbox: 'Sans sandbox — tentatives d\'authentification SSH plafonnées et journalisées',
+    capabilities: [
+      'Identifiants par défaut détectés → CRITICAL',
+      'Tolérance au brute-force mesurée (sans blocage)',
+      "Débit et liste strictement plafonnés (éthique)",
+    ],
+    supportedTargets: [...TOOL_TARGET_COMPAT.HYDRA],
+    family: 'EXPLOIT',
+  },
+  {
+    id: 'JOHN',
+    name: 'John the Ripper',
+    description:
+      "Craquage de hashes de mots de passe détectés dans un dépôt audité (John the Ripper jumbo) : balayage des " +
+      "fichiers (htpasswd, shadow, LDAP {SSHA}, bcrypt, md5crypt/sha256crypt/sha512crypt) puis tentative de " +
+      "craquage avec la wordlist standard. Un hash non craqué n'est pas un constat — un mot de passe trouvé l'est.",
+    nature: 'Craquage de hashes faibles (Openwall, C — jumbo)',
+    integration: 'détection par motifs, wordlist john-data (--rules en DEEP), stdout parsé',
+    sandbox: 'Sans sandbox — lecture seule du dépôt cloné, craquage hors-ligne',
+    capabilities: [
+      'Détection de 7 formats de hash dans le dépôt',
+      'Mots de passe triviaux → CRITICAL',
+      'Rapport honnête (hashes détectés vs craqués)',
+    ],
+    supportedTargets: [...TOOL_TARGET_COMPAT.JOHN],
+    family: 'EXPLOIT',
+  },
 ]
 
 export const GET = withApi(async () => {

@@ -38,7 +38,9 @@ export const FINDING_STATUSES: FindingStatus[] = ['OPEN', 'CONFIRMED', 'FALSE_PO
  * P5 « Arsenal » — catalogue complet des outils :
  *  - plateformes/agents IA : PHANTOM, DEEPAUDIT, BASALT, REDAMON ;
  *  - evergreen : SUBFINDER, AMASS, HTTPX (recon) · NUCLEI, NIKTO, ZAP (DAST) ·
- *    SEMGREP, TRIVY, GITLEAKS (SAST/SCA) · SQLMAP, FFUF (exploitation).
+ *    SEMGREP, TRIVY, GITLEAKS (SAST/SCA) · SQLMAP, FFUF (exploitation) ;
+ *  - Sprint 1 : WPSCAN, DALFOX, TESTSSL (DAST/CMS/TLS) · WHATWEB, WAFW00F (recon) ·
+ *    HYDRA, JOHN (exploitation).
  * Synchronisé avec TOOLS du moteur (mini-services/scan-engine/src/index.ts).
  */
 export const TOOLS: Tool[] = [
@@ -47,6 +49,7 @@ export const TOOLS: Tool[] = [
   'NUCLEI', 'NIKTO', 'ZAP',
   'SEMGREP', 'TRIVY', 'GITLEAKS',
   'SQLMAP', 'FFUF',
+  'WPSCAN', 'DALFOX', 'WHATWEB', 'TESTSSL', 'WAFW00F', 'HYDRA', 'JOHN',
 ]
 export const SCAN_STATUSES: ScanStatus[] = ['QUEUED', 'RUNNING', 'COMPLETED', 'FAILED', 'CANCELLED']
 export const TARGET_TYPES: TargetType[] = ['URL', 'GIT', 'NETWORK']
@@ -71,6 +74,14 @@ export const TOOL_FAMILY: Record<Tool, ToolFamily> = {
   GITLEAKS: 'CODE',
   SQLMAP: 'EXPLOIT',
   FFUF: 'EXPLOIT',
+  // Sprint 1 — élargissement arsenal
+  WPSCAN: 'DAST',
+  DALFOX: 'DAST',
+  WHATWEB: 'RECON',
+  TESTSSL: 'DAST',
+  WAFW00F: 'RECON',
+  HYDRA: 'EXPLOIT',
+  JOHN: 'EXPLOIT',
 }
 
 export const TOOL_FAMILY_LABEL: Record<ToolFamily, string> = {
@@ -117,6 +128,14 @@ export const TOOL_TARGET_COMPAT: Record<Tool, TargetType[]> = {
   GITLEAKS: ['GIT'], // secrets sur dépôt cloné
   SQLMAP: ['URL'], // endpoint HTTP
   FFUF: ['URL'], // URL de base de fuzzing
+  // Sprint 1 — élargissement arsenal
+  WPSCAN: ['URL'], // site WordPress déployé
+  DALFOX: ['URL'], // endpoint/URL de base pour le scan XSS
+  WHATWEB: ['URL', 'NETWORK'], // empreinte web (URL ou hôte)
+  TESTSSL: ['URL', 'NETWORK'], // endpoint TLS (hôte[:port] dérivé)
+  WAFW00F: ['URL'], // URL de base de détection WAF
+  HYDRA: ['NETWORK'], // hôte unique (module SSH, identifiants par défaut)
+  JOHN: ['GIT'], // hashes faibles dans le dépôt cloné
 }
 
 export function isToolCompatible(tool: Tool, targetType: TargetType): boolean {

@@ -29,7 +29,14 @@ export type Tool =
   | "TRIVY"
   | "GITLEAKS"
   | "SQLMAP"
-  | "FFUF";
+  | "FFUF"
+  | "WPSCAN"
+  | "DALFOX"
+  | "WHATWEB"
+  | "TESTSSL"
+  | "WAFW00F"
+  | "HYDRA"
+  | "JOHN";
 
 /** P5 : famille d'un outil (regroupement catalogue / assistant de campagne). */
 export type ToolFamily = "AGENT" | "RECON" | "DAST" | "CODE" | "EXPLOIT";

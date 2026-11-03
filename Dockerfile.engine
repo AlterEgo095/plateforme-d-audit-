@@ -76,6 +76,41 @@ RUN sed -i 's/priority_tools=\["nmap", "httpx", "nuclei", "sqlmap", "ffuf", "nik
 COPY --from=oven/bun:1 /usr/local/bin/bun /usr/local/bin/bun
 COPY --from=build /engine /engine
 
+# ── Sprint 1 « élargissement de l'arsenal » — 7 outils supplémentaires ──────
+# hydra + john(+john-data) : paquets Debian ; wafw00f : pip ; dalfox v3.2.4 :
+# binaire Go (release GitHub, tar.gz linux-x86_64) ; wpscan 4.x : gem Ruby
+# (nokogiri/ffi précompilés — build-essential en secours) ; whatweb v0.6.4 et
+# testssl.sh v3.2.4 : tarballs sources (whatweb → gems ipaddr/addressable/json ;
+# testssl.sh → wrapper /usr/local/bin qui préserve son répertoire, requis pour
+# qu'il trouve son openssl dédié dans ./bin). Symlinks john/hydra : le binaire
+# Debian peut vivre dans /usr/sbin (toujours couvert ici quel que soit le PATH).
+RUN apt-get update -y \
+    && apt-get install -y --no-install-recommends \
+         hydra john john-data dnsutils ruby ruby-dev build-essential \
+    && rm -rf /var/lib/apt/lists/* \
+    && ln -sf "$(command -v john)" /usr/local/bin/john \
+    && ln -sf "$(command -v hydra)" /usr/local/bin/hydra \
+    && pip install --no-cache-dir wafw00f \
+    && curl -fsSL -o /tmp/dalfox.tgz \
+         "https://github.com/hahwul/dalfox/releases/download/v3.2.4/dalfox-v3.2.4-linux-x86_64.tar.gz" \
+    && mkdir -p /tmp/dalfox && tar xzf /tmp/dalfox.tgz -C /tmp/dalfox \
+    && install -m 0755 "$(find /tmp/dalfox -type f -name dalfox | head -1)" /usr/local/bin/dalfox \
+    && rm -rf /tmp/dalfox /tmp/dalfox.tgz \
+    && gem install --no-document wpscan \
+    && curl -fsSL -o /tmp/whatweb.tgz \
+         "https://github.com/urbanadventurer/WhatWeb/archive/refs/tags/v0.6.4.tar.gz" \
+    && tar xzf /tmp/whatweb.tgz -C /opt \
+    && mv /opt/WhatWeb-0.6.4 /opt/whatweb && rm /tmp/whatweb.tgz \
+    && gem install --no-document ipaddr addressable json \
+    && printf '#!/bin/sh\nexec /opt/whatweb/whatweb "$@"\n' > /usr/local/bin/whatweb \
+    && chmod +x /usr/local/bin/whatweb \
+    && curl -fsSL -o /tmp/testssl.tgz \
+         "https://github.com/testssl/testssl.sh/archive/refs/tags/v3.2.4.tar.gz" \
+    && tar xzf /tmp/testssl.tgz -C /opt \
+    && mv /opt/testssl.sh-3.2.4 /opt/testssl.sh && rm /tmp/testssl.tgz \
+    && printf '#!/bin/sh\nexec /opt/testssl.sh/testssl.sh "$@"\n' > /usr/local/bin/testssl.sh \
+    && chmod +x /usr/local/bin/testssl.sh
+
 # Nettoyage cosmétique (fin d'étape finale) : un run nuclei pendant le build
 # laisse un résidu LevelDB temporaire dans /tmp — purge pour que l'image
 # livrée ait un /tmp propre (aligné avec scripts/Dockerfile.engine, prod).

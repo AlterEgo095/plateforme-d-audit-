@@ -35,6 +35,14 @@ export const TOOL_FACTORS: Record<Tool, number> = {
   GITLEAKS: 0.4,
   SQLMAP: 0.9,
   FFUF: 0.45,
+  // Sprint 1 — élargissement arsenal
+  WPSCAN: 0.6,
+  DALFOX: 0.7,
+  WHATWEB: 0.25,
+  TESTSSL: 0.8,
+  WAFW00F: 0.2,
+  HYDRA: 0.35,
+  JOHN: 0.3,
 };
 
 export const PHASES: Record<Tool, { name: string; frac: number }[]> = {
@@ -135,6 +143,47 @@ export const PHASES: Record<Tool, { name: string; frac: number }[]> = {
     { name: "INIT", frac: 0.08 },
     { name: "PRÉPARATION FUZZING", frac: 0.18 },
     { name: "FUZZING MASSE", frac: 0.54 },
+    { name: "RAPPORT", frac: 0.2 },
+  ],
+  // ── Sprint 1 — élargissement arsenal ──
+  WPSCAN: [
+    { name: "INIT", frac: 0.08 },
+    { name: "ÉNUMÉRATION WP", frac: 0.4 },
+    { name: "PLUGINS / THÈMES / USERS", frac: 0.32 },
+    { name: "RAPPORT", frac: 0.2 },
+  ],
+  DALFOX: [
+    { name: "INIT", frac: 0.08 },
+    { name: "DÉCOUVERTE PARAMÈTRES", frac: 0.34 },
+    { name: "INJECTION PAYLOADS", frac: 0.38 },
+    { name: "RAPPORT", frac: 0.2 },
+  ],
+  WHATWEB: [
+    { name: "INIT", frac: 0.1 },
+    { name: "EMPREINTE CIBLE", frac: 0.6 },
+    { name: "CONSOLIDATION", frac: 0.3 },
+  ],
+  TESTSSL: [
+    { name: "INIT", frac: 0.06 },
+    { name: "PRÉ-TESTS", frac: 0.16 },
+    { name: "PROTOCOLS / CIPHERS", frac: 0.38 },
+    { name: "VULNÉRABILITÉS TLS", frac: 0.28 },
+    { name: "RAPPORT", frac: 0.12 },
+  ],
+  WAFW00F: [
+    { name: "INIT", frac: 0.1 },
+    { name: "SONDES WAF", frac: 0.55 },
+    { name: "DÉTECTION GÉNÉRIQUE", frac: 0.35 },
+  ],
+  HYDRA: [
+    { name: "INIT", frac: 0.12 },
+    { name: "ATTAQUE DICTIONNAIRE", frac: 0.66 },
+    { name: "VÉRIFICATION", frac: 0.22 },
+  ],
+  JOHN: [
+    { name: "INIT", frac: 0.1 },
+    { name: "CHARGEMENT HASHES", frac: 0.28 },
+    { name: "CRAQUAGE WORDLIST", frac: 0.42 },
     { name: "RAPPORT", frac: 0.2 },
   ],
 };
@@ -1719,6 +1768,428 @@ export const FINDING_POOLS: Record<Tool, FindingTemplate[]> = {
       sentinel: false,
     },
   ],
+  // ── Sprint 1 — élargissement arsenal ──
+  WPSCAN: [
+    {
+      key: "wp1",
+      title: "Plugin WordPress vulnérable : wp-file-manager — RCE non authentifié",
+      severity: "HIGH",
+      confidence: "CONFIRMED",
+      category: "sca",
+      cve: "CVE-2020-25213",
+      cvss: 8.8,
+      location: "<TARGET>/wp-content/plugins/wp-file-manager/lib/php/connector.minimal.php",
+      description:
+        "WPScan a identifié wp-file-manager en version vulnérable : l'endpoint elFinder est accessible sans " +
+        "authentification et permet le téléversement de fichiers arbitraires (exécution de code à distance). " +
+        "Les plugins WordPress représentent la première source de compromission des sites CMS.",
+      evidence:
+        "[+] wp-file-manager: 6.9 (outdated, latest: 7.2.8)\n" +
+        "[!] Vulnerability: Unauthenticated RCE via elFinder connector\n" +
+        "[i] Fixed in: 6.9 — CVE-2020-25213 (CVSS 8.8)",
+      poc:
+        "wpscan --url <TARGET> --enumerate vp --format json\n" +
+        "curl -F \"file=@shell.php\" \"<TARGET>/wp-content/plugins/wp-file-manager/lib/php/connector.minimal.php?cmd=upload\"",
+      remediation:
+        "Mettre à jour wp-file-manager en dernière version ; inventory continu des plugins (WPScan CLI en CI) ; " +
+        "restreindre /wp-content/plugins par WAF en attendant le correctif.",
+      sentinel: false,
+    },
+    {
+      key: "wp2",
+      title: "XML-RPC exposé — amplification de brute-force et pingback",
+      severity: "MEDIUM",
+      confidence: "CONFIRMED",
+      category: "misconfig",
+      cvss: 5.9,
+      location: "<TARGET>/xmlrpc.php",
+      description:
+        "xmlrpc.php répond aux méthodes system.listMethods et wp.getUsersBlogs : une seule requête peut tester " +
+        "des centaines de mots de passe (amplification ×100 du brute-force) et le pingback sert de réflexion DDoS.",
+      evidence:
+        "[i] XML-RPC interface accessible\n" +
+        "[+] system.listMethods — 68 méthodes exposées\n" +
+        "[+] pingback.ping disponible (réflexion DDoS possible)",
+      poc: "curl -s <TARGET>/xmlrpc.php -d '<methodCall><methodName>system.listMethods</methodName></methodCall>' | head -c 400",
+      remediation:
+        "Bloquer xmlrpc.php (config serveur, plugin de désactivation ou filter XML-RPC) si aucune intégration ne l'exige ; " +
+        "rate limit et verrouillage de compte sur wp-login.",
+      sentinel: false,
+    },
+    {
+      key: "wp3",
+      title: "Énumération d'utilisateurs WordPress via REST API",
+      severity: "LOW",
+      confidence: "CONFIRMED",
+      category: "auth",
+      cvss: 3.1,
+      location: "<TARGET>/wp-json/wp/v2/users",
+      description:
+        "La REST API divulgue les identifiants des auteurs (slug admin) : un attaquant obtient les noms de comptes " +
+        "valides sans aucune tentative de connexion — moitié du travail du brute-force est déjà faite.",
+      evidence:
+        "[i] User(s) Identified: admin\n" +
+        "[+] Confirmed Via: REST API — /wp-json/wp/v2/users?id=1\n" +
+        "[i] 2 utilisateurs énumérés au total",
+      poc: "curl -s <TARGET>/wp-json/wp/v2/users | head -c 400",
+      remediation:
+        "Masquer /wp-json/wp/v2/users pour les visiteurs anonymes ; supprimer les mentions d'auteur des thèmes ; MFA sur wp-login.",
+      sentinel: false,
+    },
+  ],
+  DALFOX: [
+    {
+      key: "df1",
+      title: "XSS réfléchi confirmé — paramètre q (contexte HTML)",
+      severity: "HIGH",
+      confidence: "CONFIRMED",
+      category: "xss",
+      cvss: 7.1,
+      location: "GET <TARGET>/search — paramètre q (inHTML)",
+      description:
+        "Dalfox a DÉCLENCHÉ un payload avec succès sur le paramètre q : le script s'exécute dans la page rendue " +
+        "(vérification DOM par marqueur unique). Un lien piégé suffit à exécuter du JavaScript arbitraire sous " +
+        "l'identité de la victime authentifiée.",
+      evidence:
+        "[V][GET][inHTML-URL] Triggered XSS Payload: q=<svg onload=alert(1)>\n" +
+        "[i] confidence: high — payload reached an executable position\n" +
+        "[i] 32 requêtes injectées, 1 déclenchement confirmé",
+      poc: "dalfox scan \"<TARGET>/search?q=auditforge\" -f json -o dalfox.json --only-poc v,r\ncurl -s \"<TARGET>/search?q=<svg onload=alert(1)>\"",
+      remediation:
+        "Échappement contextuel systématique ; CSP stricte (nonce) ; validation du paramètre q (allowlist de caractères) ; " +
+        "cookies HttpOnly pour limiter l'exfiltration.",
+      sentinel: false,
+    },
+    {
+      key: "df2",
+      title: "Réflexion brute dans un attribut HTML — candidat XSS",
+      severity: "MEDIUM",
+      confidence: "PROBABLE",
+      category: "xss",
+      cvss: 5.4,
+      location: "GET <TARGET>/profile — paramètre name (inATTR-double)",
+      description:
+        "Le paramètre name est réfléchi dans un attribut double-quoté sans encodage : le payload onmouseover=" +
+        "\"alert(1)\"" +
+        " franchit le contexte selon le navigateur — candidat à confirmer manuellement (interaction utilisateur requise).",
+      evidence:
+        "[R][GET][inATTR-double] Reflection found: name=\"<payload>\"\n" +
+        "[i] PoC généré : dalfox can handle — à retester manuellement",
+      poc: "dalfox scan \"<TARGET>/profile?name=auditforge\" -f json --only-poc v,r",
+      remediation: "Encoder les valeurs insérées en attribut (HTML attribute encoding) ; éviter la construction DOM par concaténation.",
+      sentinel: false,
+    },
+    {
+      key: "df3",
+      title: "Synthèse Dalfox : surface XSS cartographiée",
+      severity: "INFO",
+      confidence: "CONFIRMED",
+      category: "xss",
+      cvss: 0,
+      location: "<TARGET>/",
+      description:
+        "Dalfox a testé les paramètres détectés (mining query + blind) : 1 payload déclenché, 2 réflexions candidates. " +
+        "Chaque constat individuel embarque le payload, le contexte d'injection et une URL de preuve.",
+      evidence:
+        "[meta] findings_count: 3 — targets: 1 — total_requests: 142\n" +
+        "[meta] dedup_mode: exact — incomplete: false",
+      poc: "dalfox scan <TARGET> -f json -o dalfox.json --only-poc v,r,a",
+      remediation: "Re-tester les candidats manuellement ; déployer une CSP report-only puis enforcing pour réduire l'impact résiduel.",
+      sentinel: false,
+    },
+  ],
+  WHATWEB: [
+    {
+      key: "ww1",
+      title: "Version de PHP exposée dans les en-têtes et métadonnées",
+      severity: "LOW",
+      confidence: "CONFIRMED",
+      category: "info-disclosure",
+      cvss: 3.1,
+      location: "<TARGET>/ — en-tête X-Powered-By",
+      description:
+        "whatweb a identifié PHP 7.4.3 précisément (X-Powered-By + signatures de page). Cette version est EOL : " +
+        "les failles publiques post-EOL ne recevront aucun correctif — un attaquant cible directement cette version.",
+      evidence:
+        "X-Powered-By: PHP/7.4.3\n" +
+        "PHP[7.4.3], Apache[2.4.29], WordPress[6.2, /wp-content/themes/twentytwentythree/]\n" +
+        "whatweb -a 3 : 18 plugins identifiés",
+      poc: "whatweb -a 3 --log-json=whatweb.json <TARGET>",
+      remediation: "expose_php=Off ; ServerTokens Prod ; migration vers une version supportée de PHP ; inventaire technologique continu.",
+      sentinel: false,
+    },
+    {
+      key: "ww2",
+      title: "Empreinte technologique complète : stack serveur divulguée",
+      severity: "INFO",
+      confidence: "CONFIRMED",
+      category: "recon",
+      cvss: 0,
+      location: "<TARGET>/",
+      description:
+        "18 technologies identifiées (nginx, PHP, WordPress, jQuery 1.12, Google Analytics) : la cartographie " +
+        "exacte de la stack oriente la sélection d'exploits sans phase de reconnaissance pour l'attaquant.",
+      evidence:
+        "HTTPServer[nginx/1.18.0], X-Powered-By[PHP/7.4.3], WordPress, jQuery[1.12.4],\n" +
+        "Title[« Bienvenue »], HTML5, Open-Graph, Google-Analytics",
+      poc: "whatweb -a 1 <TARGET>",
+      remediation: "Réduire les empreintes (en-têtes, métadonnées, chemins génériques) — défense en profondeur, pas une faille en soi.",
+      sentinel: false,
+    },
+    {
+      key: "ww3",
+      title: "Point d'entrée d'administration détecté par empreinte",
+      severity: "LOW",
+      confidence: "CONFIRMED",
+      category: "recon",
+      cvss: 3.5,
+      location: "<TARGET>/wp-login.php",
+      description:
+        "La page de connexion d'administration est exposée publiquement et identifiée par whatweb (WordPress login) : " +
+        "surface de brute-force et d'énumération de comptes confirmée.",
+      evidence: "WordPress[6.2], wp-login.php[200], Password-Field[pwd] — console d'administration exposée",
+      poc: "whatweb -a 1 <TARGET>/wp-login.php",
+      remediation: "Restreindre /wp-login par IP/VPN ou WAF ; MFA obligatoire ; rate limit par compte et par IP.",
+      sentinel: false,
+    },
+  ],
+  TESTSSL: [
+    {
+      key: "ts1",
+      title: "Protocoles TLS obsolètes encore offerts (TLSv1.0/1.1)",
+      severity: "MEDIUM",
+      confidence: "CONFIRMED",
+      category: "tls",
+      cvss: 5.3,
+      location: "<TARGET>:443",
+      description:
+        "Le serveur accepte TLSv1.0 et TLSv1.1 (désapprouvés, RFC 8996) : dégradation possible de la négociation " +
+        "( downgrade ) et interception par un attaquant en position réseau sur les clients legacy.",
+      evidence:
+        "TLSv1.0   offered (NOT ok) — final choice: RSA-CBC-SHA\n" +
+        "TLSv1.1   offered (NOT ok) — deprecated protocol\n" +
+        "TLSv1.2   offered (OK) — TLSv1.3 offered (OK)",
+      poc: "testssl.sh --jsonfile-pretty testssl.json <TARGET>:443\nnmap --script ssl-enum-ciphers -p 443 <TARGET>",
+      remediation: "N'offrir que TLSv1.2 et TLSv1.3 ; supprimer les suites CBC/3DES ; surveiller les clients legacy avant coupure.",
+      sentinel: false,
+    },
+    {
+      key: "ts2",
+      title: "Suites de chiffrement faibles offertes (CBC, RSA statique)",
+      severity: "LOW",
+      confidence: "CONFIRMED",
+      category: "tls",
+      cvss: 3.7,
+      location: "<TARGET>:443",
+      description:
+        "Des suites CBC (vulnérables Lucky13/padding oracles historiques) et un échange RSA statique (PFS absent) " +
+        "sont proposées : le secret d'une session capturée peut être déchiffré si la clé privée fuit un jour.",
+      evidence:
+        "CBC cipher offered — AES256-SHA (déconseillé)\n" +
+        "No PFS — RSA key exchange sur 4 suites\n" +
+        "Forward Secrecy: OK sur TLSv1.3 uniquement",
+      poc: "testssl.sh -E <TARGET>:443 (énumération complète des suites)",
+      remediation: "Restreindre aux suites AEAD (AES-GCM, ChaCha20) avec ECDHE ; désactiver l'échange RSA statique.",
+      sentinel: false,
+    },
+    {
+      key: "ts3",
+      title: "HSTS absent — rétrogradation SSL possible au premier contact",
+      severity: "LOW",
+      confidence: "CONFIRMED",
+      category: "tls",
+      cvss: 3.7,
+      location: "<TARGET>:443 — en-tête Strict-Transport-Security",
+      description:
+        "L'en-tête Strict-Transport-Security n'est pas émis : un attaquant en position MITM peut forcer le premier " +
+        "contact en HTTP clair (SSL stripping) même si le site supporte HTTPS.",
+      evidence:
+        "Strict-Transport-Security: NOT offered\n" +
+        "HTTP→HTTPS redirect: OK (301) — mais mémorisation absente",
+      poc: "testssl.sh -H <TARGET>:443 ; curl -sI <TARGET> | grep -i strict",
+      remediation: "Émettre HSTS (max-age ≥ 31536000, includeSubDomains, preload) après vérification de la couverture des sous-domaines.",
+      sentinel: false,
+    },
+  ],
+  WAFW00F: [
+    {
+      key: "wf1",
+      title: "Aucun WAF détecté en amont de l'application",
+      severity: "LOW",
+      confidence: "CONFIRMED",
+      category: "misconfig",
+      cvss: 3.7,
+      location: "<TARGET>/",
+      description:
+        "wafw00f (tous détecteurs + détection générique par différences de réponses) n'a identifié aucun pare-feu " +
+        "applicatif : les vecteurs d'attaque standard (XSS, SQLi, traversée) atteignent l'application sans filtrage " +
+        "ni ralentissement intermédiaire.",
+      evidence:
+        "[+] Generic Detection results: No WAF detected\n" +
+        "[~] Number of requests: 12 — 0 signature d'éditeur reconnue",
+      poc: "wafw00f <TARGET> -a -o wafw00f.json",
+      remediation:
+        "Évaluer l'ajout d'un WAF/CDN (Cloudflare, ModSecurity, AWS WAF) en complément — jamais en défense unique — " +
+        "ou documenter le choix d'assumer l'exposition directe.",
+      sentinel: false,
+    },
+    {
+      key: "wf2",
+      title: "WAF détecté : Cloudflare (empreinte d'éditeur)",
+      severity: "INFO",
+      confidence: "CONFIRMED",
+      category: "recon",
+      cvss: 0,
+      location: "<TARGET>/",
+      description:
+        "Un pare-feu applicatif Cloudflare intercepte les requêtes (en-têtes cf-ray, comportement de blocage). " +
+        "Connaître le WAF permet de calibrer les tests : bypass connus, rate limit, règles spécifiques de l'éditeur.",
+      evidence:
+        "[+] Cloudflare (Cloudflare Inc.) detected\n" +
+        "[i] trigger : différences de réponse sur vecteur XSS\n" +
+        "[i] manufacturer: Cloudflare Inc.",
+      poc: "wafw00f <TARGET> -a",
+      remediation: "Vérifier la couverture réelle (règles managed actives ?) — un WAF détecté ne garantit pas un blocage effectif.",
+      sentinel: false,
+    },
+    {
+      key: "wf3",
+      title: "Réponses différenciées détectées — filtrage intermédiaire probable",
+      severity: "INFO",
+      confidence: "PROBABLE",
+      category: "recon",
+      cvss: 0,
+      location: "<TARGET>/",
+      description:
+        "La détection générique a observé des réponses différentes (code/longueur/en-têtes) entre requêtes normales et " +
+        "vecteurs d'attaque : un dispositif de filtrage non signaturé (WAF custom, module serveur) est probable.",
+      evidence:
+        "[~] The server returns a different response code when an attack string is used\n" +
+        "[~] vecteurs testés : XSS, XXE, LFI, SQLi, OSCI",
+      poc: "wafw00f <TARGET> -a -v (verbose)",
+      remediation: "Identifier le composant filtrant (proxy, module NGINX, règle iptables ?) et documenter sa couverture.",
+      sentinel: false,
+    },
+  ],
+  HYDRA: [
+    {
+      key: "hy1",
+      title: "Identifiants par défaut valides sur SSH — root/toor",
+      severity: "CRITICAL",
+      confidence: "CONFIRMED",
+      category: "auth",
+      cvss: 9.8,
+      location: "ssh://<TARGET>:22 — compte root",
+      description:
+        "hydra a authentifié le compte root avec le mot de passe par défaut « toor » (liste fixe de 14 paires " +
+        "courantes, débit plafonné) : accès distant complet à l'hôte avec le compte le plus privilégié.",
+      evidence:
+        "[22][ssh] host: <TARGET>   login: root   password: toor\n" +
+        "[i] 14 paires par défaut testées — succès à la tentative 2\n" +
+        "[i] arrêt au premier succès (-f)",
+      poc: "hydra -C default-creds.txt -t 4 -f ssh://<TARGET>\nssh root@<TARGET>",
+      remediation:
+        "Changer immédiatement le mot de passe root ; PermitsRootLogin no ; authentification par clés uniquement ; " +
+        "fail2ban + restriction IP source.",
+      sentinel: false,
+    },
+    {
+      key: "hy2",
+      title: "SSH exposé sans verrouillage — brute-force réalisable",
+      severity: "MEDIUM",
+      confidence: "PROBABLE",
+      category: "auth",
+      cvss: 5.3,
+      location: "ssh://<TARGET>:22",
+      description:
+        "Le service SSH accepte les tentatives d'authentification par mot de passe sans verrouillage ni bannissement " +
+        "détecté pendant le test : un brute-force à grande échelle reste possible depuis Internet.",
+      evidence:
+        "[i] 14 tentatives effectuées sans blocage ni délai détecté\n" +
+        "[i] password authentication: enabled\n" +
+        "[i] fail2ban/bannissement : non détecté",
+      poc: "hydra -C default-creds.txt -t 4 ssh://<TARGET> (sans -f pour mesurer la tolérance)",
+      remediation: "fail2ban (maxretry 3) ; clés SSH uniquement (PasswordAuthentication no) ; port non standard si pertinent ; allowlist IP.",
+      sentinel: false,
+    },
+    {
+      key: "hy3",
+      title: "Test d'identifiants par défaut : aucun succès",
+      severity: "INFO",
+      confidence: "CONFIRMED",
+      category: "auth",
+      cvss: 0,
+      location: "ssh://<TARGET>:22",
+      description:
+        "Aucune des 14 paires d'identifiants par défaut les plus courantes n'a permis de s'authentifier sur le service " +
+        "SSH de la cible. Aucun compte générique actif détecté (périmètre : liste fixe, débit plafonné).",
+      evidence:
+        "[i] 14 paires testées (root, admin, test, ubuntu, debian, pi, user, guest…)\n" +
+        "[i] 0 identifiant valide — service SSH joignable et testé",
+      poc: "hydra -C default-creds.txt -t 4 -f ssh://<TARGET>",
+      remediation: "Conserver la politique actuelle ; vérifier périodiquement l'absence de comptes par défaut après chaque déploiement.",
+      sentinel: false,
+    },
+  ],
+  JOHN: [
+    {
+      key: "jh1",
+      title: "Hash craqué avec la wordlist par défaut — htpasswd:admin → « abc123 »",
+      severity: "CRITICAL",
+      confidence: "CONFIRMED",
+      category: "secrets",
+      cvss: 9.1,
+      location: "target-repo/deploy/htpasswd:1 — compte admin",
+      description:
+        "John the Ripper a craqué en quelques secondes le hash du compte admin contenu dans deploy/htpasswd du dépôt : " +
+        "le mot de passe « abc123 » est trivial (dictionnaire de base). Tout service protégé par ce htpasswd est ouvert.",
+      evidence:
+        "abc123         (deploy/htpasswd:admin)\n" +
+        "Loaded 2 password hashes with 2 different salts\n" +
+        "[i] wordlist: /usr/share/john/password.lst (3546 entrées) — 1 crack",
+      poc: "john --wordlist=/usr/share/john/password.lst hashes.txt\ngrep admin deploy/htpasswd",
+      remediation:
+        "Changer immédiatement le mot de passe ; retirer les fichiers de credentials du dépôt (et de l'historique git) ; " +
+        "hachage bcrypt/argon2id ; gestionnaire de secrets.",
+      sentinel: false,
+    },
+    {
+      key: "jh2",
+      title: "Hash de mot de passe système identifié dans le dépôt",
+      severity: "MEDIUM",
+      confidence: "CONFIRMED",
+      category: "secrets",
+      cvss: 4.3,
+      location: "target-repo/etc/shadow.example:3",
+      description:
+        "Le dépôt contient une entrée de type /etc/shadow (sha512crypt) : même dans un fichier d'exemple, un hash réel " +
+        "reste attaqué hors-ligne indéfiniment — si le mot de passe est réutilisé ailleurs, la fuite s'étend.",
+      evidence:
+        "$6$rounds=65536$salt$… (sha512crypt, 86 caractères)\n" +
+        "[i] fichier : etc/shadow.example — non craqué avec la wordlist standard",
+      poc: "john --wordlist=/usr/share/john/password.lst hashes.txt",
+      remediation: "Purger les fichiers d'exemple contenant de vrais hashes ; utiliser des valeurs fictives évidentes ; secrétisation des fixtures.",
+      sentinel: false,
+    },
+    {
+      key: "jh3",
+      title: "Balayage de hashes : aucun credential craquable trouvé",
+      severity: "INFO",
+      confidence: "CONFIRMED",
+      category: "secrets",
+      cvss: 0,
+      location: "target-repo/",
+      description:
+        "Le balayage du dépôt (htpasswd, shadow, LDAP {SSHA}, bcrypt, md5crypt, sha256crypt, sha512crypt) n'a trouvé " +
+        "aucun hash de mot de passe — aucun credential faible exposable via le dépôt.",
+      evidence:
+        "[i] motifs testés : apr1, $1$, $2a/b/y$, $5$, $6$, {SSHA}, {SHA}\n" +
+        "[i] fichiers balayés : 1 204 (limite 2 MB/fichier, exclusions .git/node_modules)",
+      poc: "john --list=formats (aucun hash détecté)",
+      remediation: "Garder la pratique actuelle ; déployer un scan pre-commit (gitleaks) pour intercepter les credentials avant push.",
+      sentinel: false,
+    },
+  ],
 };
 
 // ─── Génération des scripts de logs ───────────────────────────────────
@@ -1978,6 +2449,63 @@ const NOISE_POOLS: Record<Tool, ((target: string) => RawLine)[]> = {
     () => ({ level: "WARN", source: "net", message: "2 erreurs réseau transient — retry automatique" }),
     () => ({ level: "INFO", source: "ffuf", message: "31 statuts < 400 retenus" }),
     () => ({ level: "INFO", source: "ffuf", message: "sortie JSON : ffuf.json (structure compacte)" }),
+  ],
+  // ── Sprint 1 — élargissement arsenal : bruit de simulation ──
+  WPSCAN: [
+    () => ({ level: "INFO", source: "wpscan", message: "user-agent aléatoire : Mozilla/5.0 (X11; Linux x86_64) …" }),
+    () => ({ level: "WARN", source: "wpscan", message: "API de vulnérabilités sans token — détection limitée aux CVE publiques" }),
+    () => ({ level: "INFO", source: "wpscan", message: "plugins detection mode : mixed (passive puis agressif)" }),
+    () => ({ level: "WARN", source: "net", message: "request timeout 15s appliqué (politesse)" }),
+    () => ({ level: "INFO", source: "wpscan", message: "detection : 3 plugins, 1 thème, 2 utilisateurs" }),
+    () => ({ level: "INFO", source: "wpscan", message: "rapport JSON sérialisé (interesting_findings inclus)" }),
+  ],
+  DALFOX: [
+    () => ({ level: "INFO", source: "dalfox", message: "param mining : query + body + cookie activés" }),
+    () => ({ level: "WARN", source: "dalfox", message: "payloads bbox : 214 vecteurs par contexte (built-in)" }),
+    () => ({ level: "INFO", source: "dalfox", message: "WAF détecté : comportement de blocage absent — injection directe" }),
+    () => ({ level: "WARN", source: "net", message: "timeout 20s par requête — 3 ralentissements tolérés" }),
+    () => ({ level: "INFO", source: "dalfox", message: "déduplication exacte : 8 doublons écartés" }),
+    () => ({ level: "INFO", source: "dalfox", message: "sortie JSON : dalfox.json (findings + meta)" }),
+  ],
+  WHATWEB: [
+    () => ({ level: "INFO", source: "whatweb", message: "plugins : 1 812 chargés (reddits, aggregation, matching)" }),
+    () => ({ level: "WARN", source: "whatweb", message: "plugin meta-refresh ignoré (bruit)" }),
+    () => ({ level: "INFO", source: "whatweb", message: "match : HTTPServer[nginx], X-Powered-By[PHP]" }),
+    () => ({ level: "WARN", source: "net", message: "redirection suivie : 2 sauts (301 → 200)" }),
+    () => ({ level: "INFO", source: "whatweb", message: "log JSON : 1 cible, 18 plugins" }),
+    () => ({ level: "INFO", source: "whatweb", message: "aggressiveness level 3 : 412 requêtes" }),
+  ],
+  TESTSSL: [
+    () => ({ level: "INFO", source: "testssl", message: "openssl dédié : /opt/testssl.sh/bin/openssl.Linux.x86_64" }),
+    () => ({ level: "WARN", source: "testssl", message: "ordre des protocoles : SSLv2/SSLv3 écartés d'office" }),
+    () => ({ level: "INFO", source: "testssl", message: "cipher enumeration : 62 suites testées" }),
+    () => ({ level: "WARN", source: "testssl", message: "OCSP stapling : non supporté (flag)" }),
+    () => ({ level: "INFO", source: "testssl", message: "vérification chaîne : 2 certificats intermédiaires" }),
+    () => ({ level: "INFO", source: "testssl", message: "rapport JSON-pretty écrit (testssl.json)" }),
+  ],
+  WAFW00F: [
+    () => ({ level: "INFO", source: "wafw00f", message: "generic detection : 5 vecteurs (XSS, XXE, LFI, SQLi, OSCI)" }),
+    () => ({ level: "WARN", source: "wafw00f", message: "signature d'éditeur : 146 candidates testées" }),
+    () => ({ level: "INFO", source: "wafw00f", message: "différences de réponses analysées (code, taille, en-têtes)" }),
+    () => ({ level: "WARN", source: "net", message: "timeout 7s par sonde (défaut)" }),
+    () => ({ level: "INFO", source: "wafw00f", message: "export JSON : wafw00f.json (2 enregistrements)" }),
+    () => ({ level: "INFO", source: "wafw00f", message: "follow-redirect activé (empreinte finale)" }),
+  ],
+  HYDRA: [
+    () => ({ level: "INFO", source: "hydra", message: "module ssh chargé (libssh, 4 tâches)" }),
+    () => ({ level: "WARN", source: "hydra", message: "pause anti-ban : 10s entre les séries (-w 10)" }),
+    () => ({ level: "INFO", source: "hydra", message: "identifiants par défaut : 14 paires (liste fixe)" }),
+    () => ({ level: "WARN", source: "net", message: " connexion reset par la cible sur 1 tâche — reprise" }),
+    () => ({ level: "INFO", source: "hydra", message: "-f actif : arrêt au premier succès par hôte" }),
+    () => ({ level: "INFO", source: "hydra", message: "rapport écrit : hydra-report.txt" }),
+  ],
+  JOHN: [
+    () => ({ level: "INFO", source: "john", message: "wordlist : password.lst (3 546 entrées)" }),
+    () => ({ level: "WARN", source: "john", message: "formats supportés : 61 (jumbo) — autodetect sur le fichier" }),
+    () => ({ level: "INFO", source: "john", message: "balayage : 1 204 fichiers, 7 motifs de hash" }),
+    () => ({ level: "WARN", source: "john", message: "--no-log actif : pas de fichier journal (workdir éphémère)" }),
+    () => ({ level: "INFO", source: "john", message: "OpenMP : 4 threads (saïsies parallèles)" }),
+    () => ({ level: "INFO", source: "john", message: "session completed — pot file locale au conteneur" }),
   ],
 };
 
@@ -2501,6 +3029,145 @@ export const SCRIPT_BUILDERS: Record<Tool, (ctx: ScriptCtx) => ScriptLine[]> = {
       [
         { level: "INFO", source: "ffuf", message: `${effectiveFindingCount("FFUF", ctx.profile)} constats documentés (chemins, statuts, indices sensibles)` },
         { level: "SUCCESS", source: "ffuf", message: "sortie JSON : ffuf.json" },
+      ],
+    ]),
+  // ── Sprint 1 — élargissement arsenal : builders compacts ──
+  WPSCAN: (ctx) =>
+    assemble("WPSCAN", ctx, [
+      [
+        { level: "INFO", source: "wpscan", message: `audit WordPress de ${baseOf(ctx.target)}` },
+        { level: "CMD", source: "wpscan", message: `$ wpscan --url <cible> --format json --output wpscan.json --enumerate ${ctx.profile === "QUICK" ? "vp,vt" : ctx.profile === "STANDARD" ? "vp,vt,u" : "vp,vt,u,cb,dbe,bf"} --no-update --random-user-agent` },
+        { level: "INFO", source: "wpscan", message: "API de vulnérabilités : token absent — détection limitée aux données publiques" },
+      ],
+      [
+        { level: "INFO", source: "wpscan", message: "WordPress 6.2 identifié (en-tête + meta generator + readme)" },
+        { level: "INFO", source: "wpscan", message: "wp-file-manager 6.9 détecté (passive puis aggressive detection)" },
+        { level: "WARN", source: "wpscan", message: "xmlrpc.php accessible — 68 méthodes exposées" },
+      ],
+      [
+        { level: "WARN", source: "wpscan", message: "[!] Plugin vulnérable : wp-file-manager (CVE-2020-25213, RCE)" },
+        { level: "INFO", source: "wpscan", message: "2 utilisateurs énumérés via /wp-json/wp/v2/users" },
+        { level: "INFO", source: "wpscan", message: "theme twentytwentythree — version à jour" },
+      ],
+      [
+        { level: "INFO", source: "wpscan", message: `${effectiveFindingCount("WPSCAN", ctx.profile)} constats documentés (artefacts, plugins, utilisateurs)` },
+        { level: "SUCCESS", source: "wpscan", message: "rapport JSON : wpscan.json" },
+      ],
+    ]),
+  DALFOX: (ctx) =>
+    assemble("DALFOX", ctx, [
+      [
+        { level: "INFO", source: "dalfox", message: `scan XSS de ${baseOf(ctx.target)} (v3, moteur AST)` },
+        { level: "CMD", source: "dalfox", message: `$ dalfox scan <url> -f json -o dalfox.json -S --timeout 20 --only-poc v,r,a${ctx.profile === "DEEP" ? " --deep-scan" : ""}` },
+      ],
+      [
+        { level: "INFO", source: "dalfox", message: "param mining : q détecté (réflexion immédiate)" },
+        { level: "INFO", source: "dalfox", message: "grep DOM : marqueurs de vérification injectés" },
+        { level: "WARN", source: "dalfox", message: "WAF non détecté — injection directe possible" },
+      ],
+      [
+        { level: "INFO", source: "dalfox", message: "[V][GET][inHTML-URL] Triggered XSS Payload: q=<svg onload=alert(1)>" },
+        { level: "INFO", source: "dalfox", message: "[R][GET][inATTR-double] réflexion candidate (name)" },
+        { level: "INFO", source: "dalfox", message: "142 requêtes — 1 déclenché, 2 candidats" },
+      ],
+      [
+        { level: "INFO", source: "dalfox", message: `${effectiveFindingCount("DALFOX", ctx.profile)} constats documentés (payloads, contextes, PoC URL)` },
+        { level: "SUCCESS", source: "dalfox", message: "sortie JSON : dalfox.json (findings + meta)" },
+      ],
+    ]),
+  WHATWEB: (ctx) =>
+    assemble("WHATWEB", ctx, [
+      [
+        { level: "INFO", source: "whatweb", message: `empreinte web de ${hostOf(ctx.target)}` },
+        { level: "CMD", source: "whatweb", message: `$ whatweb --color=never --no-errors -a ${ctx.profile === "QUICK" ? "1" : ctx.profile === "STANDARD" ? "3" : "4"} --log-json=whatweb.json <cible>` },
+      ],
+      [
+        { level: "INFO", source: "whatweb", message: "1 812 plugins chargés — matching démarré" },
+        { level: "INFO", source: "whatweb", message: "HTTPServer[nginx/1.18.0], X-Powered-By[PHP/7.4.3]" },
+        { level: "INFO", source: "whatweb", message: "WordPress[6.2], jQuery[1.12.4], Title[« Bienvenue »]" },
+      ],
+      [
+        { level: "INFO", source: "whatweb", message: "18 plugins identifiés — 2 versions exposées" },
+        { level: "SUCCESS", source: "whatweb", message: "log JSON : whatweb.json (1 cible, 18 plugins)" },
+      ],
+    ]),
+  TESTSSL: (ctx) =>
+    assemble("TESTSSL", ctx, [
+      [
+        { level: "INFO", source: "testssl", message: `audit TLS de ${hostOf(ctx.target)}:443 (openssl dédié)` },
+        { level: "CMD", source: "testssl", message: "$ testssl.sh --jsonfile-pretty testssl.json --quiet <endpoint>" },
+      ],
+      [
+        { level: "INFO", source: "testssl", message: "pré-tests : connectivité OK, SNI configuré" },
+        { level: "INFO", source: "testssl", message: "TLSv1.2 offered (OK) — TLSv1.3 offered (OK)" },
+        { level: "WARN", source: "testssl", message: "TLSv1.0 offered (NOT ok) — protocole obsolète" },
+      ],
+      [
+        { level: "WARN", source: "testssl", message: "suites CBC offertes (4) — PFS absent sur RSA statique" },
+        { level: "INFO", source: "testssl", message: "certificat : SAN valides, expiration dans 62 jours" },
+        { level: "WARN", source: "testssl", message: "HSTS : NOT offered (flag)" },
+      ],
+      [
+        { level: "INFO", source: "testssl", message: `${effectiveFindingCount("TESTSSL", ctx.profile)} constats documentés (protocoles, suites, certificat, HSTS)` },
+        { level: "SUCCESS", source: "testssl", message: "rapport JSON-pretty : testssl.json" },
+      ],
+    ]),
+  WAFW00F: (ctx) =>
+    assemble("WAFW00F", ctx, [
+      [
+        { level: "INFO", source: "wafw00f", message: `détection de WAF sur ${baseOf(ctx.target)}` },
+        { level: "CMD", source: "wafw00f", message: "$ wafw00f <url> -a -o wafw00f.json --no-colors" },
+      ],
+      [
+        { level: "INFO", source: "wafw00f", message: "146 empreintes d'éditeurs testées (mode -a)" },
+        { level: "INFO", source: "wafw00f", message: "vecteurs : XSS, XXE, LFI, SQLi, OSCI — réponses comparées" },
+        { level: "WARN", source: "wafw00f", message: "0 signature d'éditeur reconnue" },
+      ],
+      [
+        { level: "INFO", source: "wafw00f", message: "generic detection : No WAF detected (12 requêtes)" },
+        { level: "SUCCESS", source: "wafw00f", message: "export JSON : wafw00f.json" },
+      ],
+    ]),
+  HYDRA: (ctx) =>
+    assemble("HYDRA", ctx, [
+      [
+        { level: "INFO", source: "hydra", message: `test d'identifiants par défaut sur ssh://${hostOf(ctx.target)}:22` },
+        { level: "CMD", source: "hydra", message: "$ hydra -C (14 paires par défaut) -t 4 -w 10 -f -o hydra-report.txt ssh://<hôte>" },
+        { level: "INFO", source: "hydra", message: "périmètre : liste FIXE d'identifiants par défaut (pas de brute-force générique)" },
+      ],
+      [
+        { level: "INFO", source: "hydra", message: "module ssh chargé — 4 tâches parallèles" },
+        { level: "INFO", source: "hydra", message: "[ATTEMPT] target ssh://<hôte> — login root, pass root" },
+        { level: "WARN", source: "hydra", message: "pause anti-ban entre séries (-w 10)" },
+      ],
+      [
+        { level: "INFO", source: "hydra", message: "14/14 paires testées — 0 identifiant valide" },
+        { level: "INFO", source: "hydra", message: "aucun blocage ni bannissement détecté (flag : tolérance au brute-force)" },
+      ],
+      [
+        { level: "INFO", source: "hydra", message: `${effectiveFindingCount("HYDRA", ctx.profile)} constats documentés (succès, tolérance, couverture)` },
+        { level: "SUCCESS", source: "hydra", message: "rapport écrit : hydra-report.txt" },
+      ],
+    ]),
+  JOHN: (ctx) =>
+    assemble("JOHN", ctx, [
+      [
+        { level: "INFO", source: "john", message: `balayage de hashes dans le dépôt cloné (${ctx.profile === "DEEP" ? "wordlist + rules" : "wordlist par défaut"})` },
+        { level: "CMD", source: "john", message: "$ john --wordlist=/usr/share/john/password.lst hashes.txt" },
+        { level: "INFO", source: "john", message: "motifs : apr1, $1$, $2a/b/y$, $5$, $6$, {SSHA}, {SHA}" },
+      ],
+      [
+        { level: "INFO", source: "john", message: "1 204 fichiers balayés — 2 hashes détectés (htpasswd + shadow.example)" },
+        { level: "INFO", source: "john", message: "Loaded 2 password hashes with 2 different salts" },
+      ],
+      [
+        { level: "WARN", source: "john", message: "abc123         (deploy/htpasswd:admin)" },
+        { level: "INFO", source: "john", message: "1/2 craqué avec la wordlist standard (3 546 entrées)" },
+        { level: "INFO", source: "john", message: "sha512crypt (shadow.example) : non craqué — pas un constat" },
+      ],
+      [
+        { level: "INFO", source: "john", message: `${effectiveFindingCount("JOHN", ctx.profile)} constats documentés (hashes détectés, craqués, résistants)` },
+        { level: "SUCCESS", source: "john", message: "session completed — pot file locale au conteneur" },
       ],
     ]),
 };

@@ -16,6 +16,11 @@ export type Role = "ADMIN" | "AUDITOR" | "VIEWER";
  *  - Scan dynamique (DAST) : NUCLEI, NIKTO, ZAP ;
  *  - Analyse de code (SAST/SCA/secrets) : SEMGREP, TRIVY, GITLEAKS ;
  *  - Exploitation ciblée : SQLMAP, FFUF.
+ * Sprint 1 « élargissement » :
+ *  - DAST/CMS : WPSCAN (WordPress), DALFOX (XSS), TESTSSL (TLS) ;
+ *  - Recon : WHATWEB (empreinte web), WAFW00F (détection WAF) ;
+ *  - Exploitation : HYDRA (identifiants par défaut), JOHN (craquage de
+ *    hash faibles détectés dans un dépôt).
  * Ajout strictement additif : la base stocke la colonne `tool` en String.
  */
 export type Tool =
@@ -33,7 +38,14 @@ export type Tool =
   | "TRIVY"
   | "GITLEAKS"
   | "SQLMAP"
-  | "FFUF";
+  | "FFUF"
+  | "WPSCAN"
+  | "DALFOX"
+  | "WHATWEB"
+  | "TESTSSL"
+  | "WAFW00F"
+  | "HYDRA"
+  | "JOHN";
 
 /** Famille d'un outil (P5 — regroupement du catalogue et de l'UI campagne). */
 export type ToolFamily = "AGENT" | "RECON" | "DAST" | "CODE" | "EXPLOIT";

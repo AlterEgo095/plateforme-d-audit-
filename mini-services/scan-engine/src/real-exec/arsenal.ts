@@ -20,7 +20,7 @@
  */
 
 import { existsSync } from "node:fs";
-import { readFile } from "node:fs/promises";
+import { readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { REAL_EXEC } from "./env";
 import { prepareTarget } from "./git-target";
@@ -1476,9 +1476,805 @@ const ffufSpec: ArsenalSpec = {
   },
 };
 
+// ─── Sprint 1 « élargissement » : WPScan / Dalfox / WhatWeb / testssl.sh /
+// ─── wafw00f / hydra / john ───────────────────────────────────────────
+
+/**
+ * Endpoint hôte[:port] pour les outils TLS/réseau :
+ *  - URL : hôte + port explicite, sinon hôte nu (testssl.sh scanne 443 par défaut —
+ *    un audit TLS porte sur le point de terminaison TLS, pas sur le port 80 clair) ;
+ *  - NETWORK : suffixe CIDR retiré, forme hôte:port conservée telle quelle.
+ */
+function endpointOfTarget(target: string, targetType: TargetType): string {
+  if (targetType === "URL") {
+    try {
+      const u = new URL(target);
+      return u.port ? `${u.hostname}:${u.port}` : u.hostname;
+    } catch {
+      return hostOfTarget(target, targetType);
+    }
+  }
+  return (target.split("/")[0] ?? target).trim();
+}
+
+/** Détection WAF — enregistrements wafw00f (JSON array, -o .json). */
+const wafw00fSpec: ArsenalSpec = {
+  tool: "WAFW00F",
+  bin: () => REAL_EXEC.wafw00fBin,
+  targets: ["URL"],
+  cap: 50,
+  phases: [
+    [/request|checking|fingerprin/i, "SONDES WAF", 45],
+    [/generic|result|number of requests/i, "DÉTECTION GÉNÉRIQUE", 85],
+  ],
+  async build(ctx) {
+    const probe = baseOfUrl(ctx.target);
+    const reportPath = join(ctx.workdir, "wafw00f.json");
+    return {
+      args: [probe, "-a", "-o", reportPath, "--no-colors"],
+      reportPath,
+      cmdLabel: `wafw00f ${probe} -a -o wafw00f.json`,
+    };
+  },
+  async parse({ reportPath }) {
+    const raw = await readReport(reportPath);
+    if (!raw.trim()) return []; // rapport absent → échec honnête (garde-fou amont)
+    const rows = parseJsonOrJsonl(raw);
+    const out: RealFinding[] = [];
+    const detected: string[] = [];
+    for (const r of rows) {
+      const url = String(r.url ?? "").trim();
+      const firewall = String(r.firewall ?? "").trim();
+      const manufacturer = String(r.manufacturer ?? "").trim();
+      if (r.detected === true && firewall && firewall !== "None") {
+        detected.push(`${firewall} (${manufacturer || "fabricant inconnu"})`);
+        out.push({
+          title: `WAF détecté : ${firewall}`, severity: "INFO",
+          confidence: "CONFIRMED", category: "recon", cve: null, cvss: null,
+          location: url || undefined,
+          description:
+            `Un pare-feu applicatif web (${firewall}${manufacturer ? `, éditeur ${manufacturer}` : ""}) intercepte ` +
+            "les requêtes malveillantes en amont de l'application. Connaître le WAF en place permet de " +
+            "calibrer les tests (bypass, rate-limit, règles bloquantes) et d'évaluer la couverture réelle " +
+            "de cette couche de défense.",
+          evidence: evidenceBlock([
+            typeof r.trigger_url === "string" && r.trigger_url
+              ? `requête de déclenchement : ${r.trigger_url}` : undefined,
+          ]),
+          sentinelTriggered: false,
+        });
+      }
+    }
+    const noneDetected = detected.length === 0;
+    if (noneDetected) {
+      out.push({
+        title: "Aucun WAF détecté en amont de la cible", severity: "LOW",
+        confidence: "CONFIRMED", category: "misconfig", cve: null, cvss: null,
+        location: undefined,
+        description:
+          "wafw00f (tous détecteurs) n'a identifié aucun pare-feu applicatif web devant l'application. " +
+          "Les requêtes offensives atteignent directement le serveur : les exploits publics et le fuzzing " +
+          "ne sont ni filtrés ni ralentis. Ce n'est pas une vulnérabilité en soi, mais une couche de " +
+          "défense en profondeur absente (ou furtive/CDN non signaturé).",
+        evidence: `Cible sondée avec l'ensemble des détecteurs wafw00f (${rows.length} résultat(s)).`,
+        sentinelTriggered: false,
+        remediation:
+          "Si un WAF est censé protéger l'application : vérifier son déploiement et sa visibilité DNS. " +
+          "Sinon : évaluer l'ajout d'un WAF/CDN (Cloudflare, AWS WAF, ModSecurity) en complément du durcissement applicatif.",
+      });
+    }
+    out.push({
+      title: `wafw00f : ${detected.length} WAF identifié(s) sur ${rows.length} enregistrement(s)`,
+      severity: "INFO", confidence: "CONFIRMED", category: "recon", cve: null, cvss: null,
+      location: undefined,
+      description: "Synthèse de la détection de WAF (empreintes d'éditeurs + détection générique par différences de réponses).",
+      evidence: evidenceBlock(detected.length ? detected : ["aucun WAF identifié"]),
+      sentinelTriggered: false,
+    });
+    return out;
+  },
+};
+
+/** Empreinte web — whatweb (log JSON array). */
+const whatwebSpec: ArsenalSpec = {
+  tool: "WHATWEB",
+  bin: () => REAL_EXEC.whatwebBin,
+  targets: ["URL", "NETWORK"],
+  cap: 120,
+  phases: [
+    [/loading|plugin|start/i, "CHARGEMENT PLUGINS", 20],
+    [/target|scanning|request/i, "EMPREINTE CIBLE", 65],
+    [/finished|summar/i, "CONSOLIDATION", 90],
+  ],
+  async build(ctx) {
+    const probe = httpProbeTarget(ctx.target, ctx.targetType);
+    const reportPath = join(ctx.workdir, "whatweb.json");
+    // Aggressiveness : 1 (furtif) → 3 (agressif) → 4 (heavy, DEEP uniquement).
+    const aggr = ctx.profile === "QUICK" ? "1" : ctx.profile === "STANDARD" ? "3" : "4";
+    return {
+      args: ["--color=never", "--no-errors", "-a", aggr, `--log-json=${reportPath}`, probe],
+      reportPath,
+      cmdLabel: `whatweb --color=never --no-errors -a ${aggr} --log-json=whatweb.json ${probe}`,
+    };
+  },
+  async parse({ reportPath }) {
+    const raw = await readReport(reportPath);
+    if (!raw.trim()) return [];
+    const rows = parseJsonOrJsonl(raw);
+    const out: RealFinding[] = [];
+    const versions: string[] = [];
+    let httpStatus = 0;
+    const pluginNames: string[] = [];
+    for (const r of rows) {
+      httpStatus = typeof r.http_status === "number" ? r.http_status : httpStatus;
+      const plugins = (r.plugins ?? {}) as Record<string, Record<string, unknown>>;
+      for (const [name, p] of Object.entries(plugins)) {
+        pluginNames.push(name);
+        const versionsList = Array.isArray(p.version) ? (p.version as unknown[]).map(String) : [];
+        if (versionsList.length > 0) versions.push(`${name} ${versionsList.join(", ")}`);
+        // Versions technologies exposées publiquement → renseigne l'attaquant
+        // (CVE ciblées par version précise).
+        const interesting = /php|apache|nginx|iis|asp\.net|wordpress|joomla|drupal|tomcat|express|struts|weblogic|shibboleth|jetty/i.test(name);
+        if (interesting && versionsList.length > 0) {
+          out.push({
+            title: `Technologie versionnée exposée : ${name} ${versionsList.join(", ")}`,
+            severity: "LOW", confidence: "CONFIRMED", category: "info-disclosure",
+            cve: null, cvss: null,
+            location: String(r.target ?? "") || undefined,
+            description:
+              `whatweb a identifié ${name} en version ${versionsList.join(", ")} via l'empreinte HTTP. ` +
+              "Une version précise exposée permet de cibler les CVE connues de cette version exacte " +
+              "sans phase de sondage.",
+            evidence: evidenceBlock([
+              `plugin : ${name}`, `version(s) : ${versionsList.join(", ")}`,
+              typeof p.string === "string" && p.string ? `détail : ${p.string}` : undefined,
+            ]),
+            sentinelTriggered: false,
+            remediation: "Masquer les en-têtes de version (ServerTokens Prod, server_tokens off, expose_php=Off) ; mettre à jour les composants.",
+          });
+        }
+      }
+    }
+    if (httpStatus >= 500) {
+      out.push({
+        title: `Erreur serveur à l'empreinte : HTTP ${httpStatus}`, severity: "LOW",
+        confidence: "CONFIRMED", category: "info-disclosure", cve: null, cvss: null,
+        location: undefined,
+        description: "La cible a répondu par une erreur serveur pendant l'empreinte — endpoint instable ou en panne.",
+        evidence: `statut HTTP : ${httpStatus}`, sentinelTriggered: false,
+      });
+    }
+    out.push({
+      title: `whatweb : ${pluginNames.length} plugin(s) d'empreinte identifié(s) (HTTP ${httpStatus || "?"})`,
+      severity: pluginNames.length > 0 ? "INFO" : "LOW",
+      confidence: "CONFIRMED", category: "recon", cve: null, cvss: null, location: undefined,
+      description:
+        `Empreinte web de la cible : ${pluginNames.length} technologie(s)/caractéristique(s) identifiée(s)` +
+        (versions.length ? ` — versions exposées : ${versions.slice(0, 10).join(" ; ")}` : " (aucune version divulguée)") +
+        ". Cette cartographie oriente le choix des exploits et des templates Nuclei.",
+      evidence: evidenceBlock(pluginNames.slice(0, 40)),
+      sentinelTriggered: false,
+    });
+    return out;
+  },
+};
+
+/** WordPress — WPScan (rapport JSON, API de vulnérabilités optionnelle). */
+const wpscanSpec: ArsenalSpec = {
+  tool: "WPSCAN",
+  bin: () => REAL_EXEC.wpscanBin,
+  targets: ["URL"],
+  cap: 200,
+  phases: [
+    [/enumerat|checking|detection/i, "ÉNUMÉRATION WP", 35],
+    [/plugins?|themes?|users?/i, "PLUGINS / THÈMES / USERS", 70],
+    [/vulnerab|finished|report/i, "RAPPORT", 92],
+  ],
+  async build(ctx) {
+    const probe = baseOfUrl(ctx.target);
+    const reportPath = join(ctx.workdir, "wpscan.json");
+    const enums =
+      ctx.profile === "QUICK" ? "vp,vt"
+      : ctx.profile === "STANDARD" ? "vp,vt,u"
+      : "vp,vt,u,cb,dbe,bf"; // DEEP : + config-backups, db-exports, backup-folders
+    return {
+      args: [
+        "--url", probe, "--format", "json", "--output", reportPath,
+        "--no-banner", "--no-update", "--random-user-agent",
+        "--request-timeout", "15", "--connect-timeout", "10",
+        "--enumerate", enums,
+      ],
+      reportPath,
+      cmdLabel: `wpscan --url ${probe} --format json --enumerate ${enums} --no-update --random-user-agent`,
+    };
+  },
+  async parse({ reportPath }) {
+    const raw = await readReport(reportPath);
+    if (!raw.trim()) return [];
+    const rows = parseJsonOrJsonl(raw);
+    const out: RealFinding[] = [];
+    const wpscanCvss = (score: unknown, rating: unknown): RealFinding["severity"] => {
+      if (typeof score === "number" && score > 0) {
+        if (score >= 9) return "CRITICAL";
+        if (score >= 7) return "HIGH";
+        if (score >= 4) return "MEDIUM";
+        return "LOW";
+      }
+      const r = String(rating ?? "").toLowerCase();
+      if (SEVERITIES.has(r)) return r.toUpperCase() as RealFinding["severity"];
+      return "HIGH";
+    };
+    /** Parse un bloc "item" (plugin/thème) : obsolète + vulnérabilités CVE. */
+    const wpItemFindings = (slug: string, item: Record<string, unknown>, kind: "plugin" | "thème") => {
+      const version = (item.version ?? {}) as Record<string, unknown>;
+      const vnum = String(version.number ?? "?").trim();
+      if (version.outdated === true) {
+        out.push({
+          title: `${kind === "plugin" ? "Plugin" : "Thème"} WordPress obsolète : ${slug} (v${vnum})`,
+          severity: "MEDIUM", confidence: "CONFIRMED", category: "sca", cve: null, cvss: null,
+          location: String(item.location ?? "") || undefined,
+          description:
+            `Le ${kind} « ${slug} » (v${vnum}) n'est plus à jour (dernière version publiée : ` +
+            `${String(version.latest_version ?? "inconnue")}). Les composants obsolètes cumulent des ` +
+            "failles publiques non corrigées et élargissent la surface d'attaque du site.",
+          evidence: evidenceBlock([
+            `version installée : ${vnum}`, `dernière version : ${String(version.latest_version ?? "?")}`,
+            version.last_updated ? `dernière mise à jour amont : ${String(version.last_updated)}` : undefined,
+          ]),
+          sentinelTriggered: false,
+          remediation: `Mettre à jour ${slug} vers ${String(version.latest_version ?? "la dernière version")} puis re-tester.`,
+        });
+      }
+      const vulns = Array.isArray(item.vulnerabilities) ? (item.vulnerabilities as Record<string, unknown>[]) : [];
+      for (const v of vulns) {
+        const title = String(v.title ?? "Vulnérabilité WordPress").trim();
+        const cvss = (v.cvss ?? {}) as Record<string, unknown>;
+        const refs = (v.references ?? {}) as Record<string, unknown>;
+        const cves = Array.isArray(refs.cve) ? (refs.cve as unknown[]).map(String) : [];
+        const fixed = String(v.fixed_in ?? "").trim();
+        out.push({
+          title: `${kind === "plugin" ? "Plugin" : "Thème"} vulnérable : ${slug} — ${title.slice(0, 140)}`,
+          severity: wpscanCvss(cvss.score, cvss.rating),
+          confidence: "CONFIRMED", category: kind === "plugin" ? "sca" : "web",
+          cve: cves[0] ? `CVE-${cves[0].replace(/^CVE-?/i, "")}` : null,
+          cvss: typeof cvss.score === "number" ? cvss.score : null,
+          location: String(item.location ?? "") || undefined,
+          description:
+            `WPScan a identifié une vulnérabilité documentée affectant ${slug} v${vnum} : ${title}` +
+            (fixed ? ` — corrigée en ${fixed}` : " (aucun correctif listé)"),
+          evidence: evidenceBlock([
+            cves.length ? `CVE : ${cves.slice(0, 5).join(", ")}` : undefined,
+            typeof cvss.score === "number" ? `CVSS : ${cvss.score} (${String(cvss.rating ?? "?")})` : undefined,
+            Array.isArray(refs.url) ? `références : ${(refs.url as unknown[]).slice(0, 3).map(String).join(" ; ")}` : undefined,
+          ]),
+          sentinelTriggered: false,
+          remediation: fixed ? `Mettre à jour ${slug} en version ${fixed} (ou au-delà).` : "Rechercher un correctif ou remplacer le composant.",
+        });
+      }
+    };
+    let artifacts = 0;
+    for (const r of rows) {
+      const interesting = Array.isArray(r.interesting_findings) ? (r.interesting_findings as Record<string, unknown>[]) : [];
+      for (const f of interesting) {
+        const toS = String(f.to_s ?? "").trim();
+        const url = String(f.url ?? "").trim();
+        if (!toS && !url) continue;
+        artifacts++;
+        const sensitive = /xmlrpc|readme|debug\.log|backup|config|\.sql|wp-content\/debug|database/i.test(`${toS} ${url}`);
+        out.push({
+          title: `Artefact WordPress exposé : ${(toS || url).slice(0, 160)}`,
+          severity: sensitive ? "MEDIUM" : "LOW", confidence: "CONFIRMED", category: "info-disclosure",
+          cve: null, cvss: null, location: url || undefined,
+          description:
+            `WPScan a identifié un artefact accessible (${toS || url}) — découvert par ${String(f.found_by ?? "sonde standard")}. ` +
+            (sensitive ? "Cet artefact peut révéler des informations techniques ou un point d'entrée d'exploitation."
+              : "Cet artefact confirme l'installation WordPress et précise son empreinte."),
+          evidence: evidenceBlock([url ? `URL : ${url}` : undefined, `découvert par : ${String(f.found_by ?? "?")}`]),
+          sentinelTriggered: false,
+          remediation: sensitive ? "Restreindre l'accès à l'artefact (XML-RPC, fichiers de debug, sauvegardes) via le serveur web ou un WAF." : undefined,
+        });
+      }
+      const version = (r.version ?? null) as Record<string, unknown> | null;
+      if (version && typeof version === "object") {
+        artifacts++;
+        const vnum = String(version.number ?? "?").trim();
+        if (vnum !== "?") {
+          out.push({
+            title: `Version WordPress identifiée : ${vnum}`, severity: "INFO",
+            confidence: "CONFIRMED", category: "recon", cve: null, cvss: null, location: undefined,
+            description:
+              `Le cœur WordPress est en version ${vnum} (découverte : ${String(version.found_by ?? "sonde standard")}). ` +
+              "Une version précise permet de cibler les CVE du cœur ; les versions anciennes devraient être mises à jour.",
+            evidence: evidenceBlock([`version : ${vnum}`, version.release_date ? `sortie : ${String(version.release_date)}` : undefined]),
+            sentinelTriggered: false,
+          });
+        }
+      }
+      const plugins = (r.plugins ?? {}) as Record<string, Record<string, unknown>>;
+      for (const [slug, item] of Object.entries(plugins)) { artifacts++; wpItemFindings(slug, item, "plugin"); }
+      const themes = (r.themes ?? {}) as Record<string, Record<string, unknown>>;
+      for (const [slug, item] of Object.entries(themes)) { artifacts++; wpItemFindings(slug, item, "thème"); }
+      const users = (r.users ?? {}) as Record<string, Record<string, unknown>>;
+      for (const name of Object.keys(users)) {
+        artifacts++;
+        out.push({
+          title: `Utilisateur WordPress divulgué : ${name}`, severity: "MEDIUM",
+          confidence: "CONFIRMED", category: "auth", cve: null, cvss: null, location: undefined,
+          description:
+            `Le nom d'utilisateur « ${name} » est divulgué publiquement (énumération d'auteurs, REST API ou flux). ` +
+            "Un nom de compte valide réduit de moitié le coût d'une attaque par force brute sur wp-login.",
+          evidence: evidenceBlock([`utilisateur : ${name}`, String(users[name]?.found_by ?? "")]),
+          sentinelTriggered: false,
+          remediation: "Masquer les mentions d'auteur (REST /users, ?author=N, flux) ; MFA et verrouillage sur wp-login."
+        });
+      }
+    }
+    if (artifacts === 0) {
+      out.push({
+        title: "WPScan : aucun artefact WordPress identifié", severity: "INFO",
+        confidence: "CONFIRMED", category: "recon", cve: null, cvss: null, location: undefined,
+        description:
+          "Le scan s'est déroulé sans erreur mais n'a détecté aucun artefact WordPress (version, plugins, thèmes, " +
+          "utilisateurs, points d'intérêt) : la cible n'est probablement pas un site WordPress, ou masque complètement son empreinte.",
+        evidence: "Rapport WPScan lu et analysé — aucun artefact.", sentinelTriggered: false,
+      });
+    }
+    return out;
+  },
+};
+
+/** XSS — Dalfox v3 (rapport JSON objet {findings, meta}). */
+const dalfoxSpec: ArsenalSpec = {
+  tool: "DALFOX",
+  bin: () => REAL_EXEC.dalfoxBin,
+  targets: ["URL"],
+  cap: 200,
+  phases: [
+    [/param|mining|discovery|analy/i, "DÉCOUVERTE PARAMÈTRES", 30],
+    [/payload|inject|test|scanning/i, "INJECTION PAYLOADS", 65],
+    [/finish|summary|report/i, "RAPPORT", 92],
+  ],
+  async build(ctx) {
+    const probe = baseOfUrl(ctx.target);
+    const reportPath = join(ctx.workdir, "dalfox.json");
+    // v3 : sous-commande « scan » (v2 : « url »). --only-poc v,r,a = vulnérabilités,
+    // réflexions exploitables, DOM AST. Sortie JSON objet (findings + meta).
+    const args = [
+      "scan", probe, "-f", "json", "-o", reportPath,
+      "-S", "--no-color", "--timeout", "20", "--only-poc", "v,r,a",
+    ];
+    if (ctx.profile === "DEEP") args.push("--deep-scan");
+    return {
+      args,
+      reportPath,
+      cmdLabel: `dalfox scan ${probe} -f json -o dalfox.json -S --timeout 20 --only-poc v,r,a${ctx.profile === "DEEP" ? " --deep-scan" : ""}`,
+    };
+  },
+  async parse({ reportPath, ctx }) {
+    const raw = await readReport(reportPath);
+    if (!raw.trim()) return [];
+    const rows = parseJsonOrJsonl(raw);
+    const out: RealFinding[] = [];
+    let confirmed = 0;
+    let candidates = 0;
+    const skipped: string[] = [];
+    for (const r of rows) {
+      // meta.target_summary : statut par cible — skipped = cible non auditable.
+      const summary = Array.isArray(r.target_summary) ? (r.target_summary as Record<string, unknown>[]) : [];
+      for (const t of summary) {
+        if (t.status === "skipped") {
+          skipped.push(`${String(t.target ?? "?")} (${String(t.error_code ?? "erreur")})`);
+        }
+      }
+      const findings = Array.isArray(r.findings) ? (r.findings as Record<string, unknown>[]) : [];
+      for (const f of findings) {
+        const type = String(f.type ?? "").toUpperCase();
+        const param = String(f.param ?? "").trim();
+        const payload = String(f.payload ?? "").trim();
+        if (!param && !payload) continue;
+        const vulnerable = type === "V" || type === "A";
+        if (vulnerable) confirmed++;
+        else candidates++;
+        out.push({
+          title: `XSS ${vulnerable ? "confirmé" : "candidat"} — paramètre ${param || "?"} (${String(f.inject_type ?? "?")})`,
+          severity: normSeverity(f.severity, vulnerable ? "HIGH" : "LOW"),
+          confidence: vulnerable ? (String(f.confidence ?? "") === "high" ? "CONFIRMED" : "PROBABLE") : "PROBABLE",
+          category: "xss", cve: null, cvss: vulnerable ? 7.1 : null,
+          location: param ? `${String(f.data ?? ctx.target).slice(0, 200)} — paramètre ${param}` : undefined,
+          description:
+            (vulnerable ? "Dalfox a DÉCLENCHÉ un payload XSS avec succès" : "Dalfox a observé une réflexion de payload exploitable") +
+            ` sur le paramètre « ${param} » (${String(f.inject_type ?? "?")} — contexte ${String(f.location ?? "?")}).` +
+            ` ${String(f.evidence ?? "")}`.trim(),
+          evidence: evidenceBlock([
+            `message : ${String(f.message_str ?? "")}`,
+            `payload : ${payload}`,
+            `méthode de détection : ${String(f.detection_method ?? "?")}`,
+            typeof f.cwe === "string" ? `CWE : ${f.cwe}` : undefined,
+          ]),
+          poc: typeof f.data === "string" && f.data ? f.data : undefined,
+          sentinelTriggered: false,
+          remediation:
+            "Échapper systématiquement les sorties HTML (contexte-aware), appliquer une CSP stricte, " +
+            "valider les entrées côté serveur et éviter les réflexions brutes dans le DOM.",
+        });
+      }
+    }
+    // Honnêteté : toutes les cibles « skipped » → l'audit n'a pas eu lieu.
+    if (candidates === 0 && confirmed === 0 && skipped.length > 0) {
+      throw new Error(
+        `dalfox n'a pu auditer la cible (toutes skippées : ${skipped.join(" ; ")}) — cible injoignable depuis le moteur ?`,
+      );
+    }
+    out.push({
+      title: `dalfox : ${confirmed} XSS confirmé(s), ${candidates} candidat(s) réfléchi(s)`,
+      severity: confirmed > 0 ? "HIGH" : "INFO", confidence: "CONFIRMED", category: "xss",
+      cve: null, cvss: null, location: undefined,
+      description:
+        `Synthèse Dalfox : ${confirmed} payload(s) déclenché(s) (exploitable) et ${candidates} réflexion(s) ` +
+        "candidat(s) (à vérifier manuellement). Chaque constat individuel ci-dessus embarque le payload, " +
+        "le contexte d'injection et une URL de preuve reproduisible.",
+      evidence: evidenceBlock([
+        skipped.length ? `cibles skippées : ${skipped.join(" ; ")}` : undefined,
+      ]),
+      sentinelTriggered: false,
+    });
+    return out;
+  },
+};
+
+/** TLS/SSL — testssl.sh (rapport JSON structuré, array). */
+const testsslSpec: ArsenalSpec = {
+  tool: "TESTSSL",
+  bin: () => REAL_EXEC.testsslBin,
+  probeTimeoutMs: 15_000,
+  targets: ["URL", "NETWORK"],
+  cap: 150,
+  phases: [
+    [/start|Services|host/i, "PRÉ-TESTS", 15],
+    [/protocol|cipher| TLS|pfs/i, "PROTOCOLS / CIPHERS", 45],
+    [/vulnerab|certificate|client/i, "VULNÉRABILITÉS TLS", 80],
+  ],
+  async build(ctx) {
+    const endpoint = endpointOfTarget(ctx.target, ctx.targetType);
+    const reportPath = join(ctx.workdir, "testssl.json");
+    return {
+      args: [
+        "--jsonfile-pretty", reportPath, "--quiet", "--color", "0",
+        "--warnings", "off", "--connect-timeout", "12", endpoint,
+      ],
+      reportPath,
+      cmdLabel: `testssl.sh --jsonfile-pretty testssl.json --quiet ${endpoint}`,
+    };
+  },
+  async parse({ reportPath }) {
+    const raw = await readReport(reportPath);
+    if (!raw.trim()) return [];
+    const rows = parseJsonOrJsonl(raw);
+    const out: RealFinding[] = [];
+    const infoLines: string[] = [];
+    let counted = 0;
+    for (const r of rows) {
+      const id = String(r.id ?? "").trim();
+      const finding = String(r.finding ?? "").trim();
+      if (!id || !finding) continue;
+      const severity = String(r.severity ?? "INFO").toUpperCase();
+      const port = typeof r.port === "number" ? r.port : null;
+      const loc = `${String(r.ip ?? r.target ?? "?")}${port ? `:${port}` : ""}`;
+      if (severity === "INFO") {
+        infoLines.push(`${id} : ${finding.slice(0, 150)}`);
+        continue;
+      }
+      counted++;
+      out.push({
+        title: `TLS ${severity.toLowerCase()} — ${id} : ${finding.slice(0, 130)}`,
+        severity: normSeverity(severity, "LOW"),
+        confidence: "CONFIRMED", category: "tls",
+        cve: typeof r.cve === "string" && r.cve.trim() ? r.cve.trim() : null,
+        cvss: null, location: loc,
+        description:
+          `testssl.sh a relevé un problème TLS de sévérité ${severity.toLowerCase()} (test ${id}) : ${finding}. ` +
+          "Les faiblesses TLS (protocoles obsolètes, suites faibles, certificats invalides, vulnérabilités " +
+          "historiques) exposent les échanges à l'interception et à la dégradation.",
+        evidence: evidenceBlock([
+          `test : ${id}`, `constat : ${finding}`,
+          typeof r.cwe === "string" && r.cwe ? `CWE : ${r.cwe}` : undefined,
+        ]),
+        sentinelTriggered: false,
+      });
+    }
+    if (counted === 0 && infoLines.length > 0) {
+      out.push({
+        title: "testssl.sh : configuration TLS sans anomalie notable", severity: "INFO",
+        confidence: "CONFIRMED", category: "tls", cve: null, cvss: null, location: undefined,
+        description:
+          "Le scan TLS complet n'a révélé aucune vulnérabilité de sévérité LOW à CRITICAL — la configuration " +
+          "TLS de l'endpoint est robuste au regard des tests standards (protocoles, suites, certificat, vulnérabilités historiques).",
+        evidence: evidenceBlock(infoLines.slice(0, 40)), sentinelTriggered: false,
+      });
+    }
+    return out;
+  },
+};
+
+/**
+ * Identifiants par défaut — hydra (SSH uniquement, liste FIXE de 14 paires
+ * par défaut, débit plafonné : t4/w10, -f stop au premier succès). Ce test
+ * ciblé remplace le brute-force générique (hors périmètre de la plateforme).
+ */
+const HYDRA_DEFAULT_CREDS = [
+  "root:root", "root:toor", "root:password", "root:123456",
+  "admin:admin", "admin:password", "admin:123456", "admin:changeme",
+  "test:test", "ubuntu:ubuntu", "debian:debian", "pi:raspberry",
+  "user:user", "guest:guest",
+] as const;
+
+const hydraSpec: ArsenalSpec = {
+  tool: "HYDRA",
+  bin: () => REAL_EXEC.hydraBin,
+  // hydra -h affiche l'aide puis sort en -1 (255) — la sonde du moteur ne
+  // regarde que la présence de sortie : probe honnête (binaire présent).
+  versionArgs: ["-h"],
+  targets: ["NETWORK"],
+  cap: 50,
+  phases: [
+    [/data|task|attempt/i, "ATTAQUE DICTIONNAIRE", 50],
+    [/valid password|login:|found/i, "VÉRIFICATION", 85],
+  ],
+  async build(ctx) {
+    if (ctx.targetType !== "NETWORK") {
+      throw new Error("hydra audite un hôte réseau (module SSH) — cible non supportée");
+    }
+    const hostPort = (ctx.target.split("/")[0] ?? ctx.target).trim();
+    if (!hostPort || hostPort.startsWith("-")) {
+      throw new Error(`cible hydra invalide : ${ctx.target}`);
+    }
+    // Liste fixe d'identifiants PAR DÉFAUT (pas de brute-force générique) —
+    // écrite dans le workdir du scan, jamais partagée entre scans.
+    const credsPath = join(ctx.workdir, "hydra-default-creds.txt");
+    await writeFile(credsPath, HYDRA_DEFAULT_CREDS.join("\n") + "\n", "utf8");
+    const reportPath = join(ctx.workdir, "hydra-report.txt");
+    return {
+      args: [
+        "-C", credsPath, "-t", "4", "-w", "10", "-f",
+        "-o", reportPath, `ssh://${hostPort}`,
+      ],
+      reportPath,
+      cmdLabel: `hydra -C (14 identifiants par défaut) -t 4 -w 10 -f -o hydra-report.txt ssh://${hostPort}`,
+    };
+  },
+  async parse({ reportPath }) {
+    const raw = await readReport(reportPath);
+    if (!raw.trim()) return [];
+    const out: RealFinding[] = [];
+    const foundRe = /^\[(\d+)\]\[(\w+)\]\s+host:\s*(\S+)\s+login:\s*(\S+)\s+password:\s*(.+?)\s*$/;
+    let found = 0;
+    for (const line of raw.split("\n")) {
+      const m = foundRe.exec(line.trim());
+      if (!m) continue;
+      found++;
+      const [, port, service, host, login, password] = m;
+      out.push({
+        title: `Identifiants par défaut valides : ${service}://host (port ${port}) — ${login}`,
+        severity: "CRITICAL", confidence: "CONFIRMED", category: "auth",
+        cve: null, cvss: 9.8, location: `${host}:${port}`,
+        description:
+          `hydra a authentifié avec succès le compte « ${login} » via un mot de passe par défaut bien connu ` +
+          `(${service} port ${port}). Un accès distant authentifié = compromission totale potentielle de l'hôte.`,
+        evidence: evidenceBlock([
+          `service : ${service} — hôte : ${host} — port : ${port}`,
+          `identifiant : ${login}`,
+          `mot de passe : ${password.slice(0, 60)}`,
+        ]),
+        poc: `ssh ${login}@${host} -p ${port}`,
+        sentinelTriggered: false,
+        remediation:
+          "Changer immédiatement le mot de passe, interdire l'authentification par mot de passe (clés SSH " +
+          "uniquement), restreindre l'accès par pare-feu/VPN et activer fail2ban.",
+      });
+    }
+    out.push({
+      title: `hydra : test d'identifiants par défaut terminé — ${found} identifiant(s) valide(s)`,
+      severity: found > 0 ? "CRITICAL" : "INFO", confidence: "CONFIRMED", category: "auth",
+      cve: null, cvss: null, location: undefined,
+      description:
+        `Vérification d'identifiants par défaut (liste FIXE de ${HYDRA_DEFAULT_CREDS.length} paires courantes, ` +
+        "débit plafonné à 4 tentatives parallèles, arrêt au premier succès) sur le service SSH de la cible. " +
+        (found > 0 ? "DES IDENTIFIANTS PAR DÉFAUT SONT ACTIFS — action immédiate requise." : "Aucun identifiant par défaut n'est actif."),
+      evidence: evidenceBlock(HYDRA_DEFAULT_CREDS.slice(0, 14)),
+      sentinelTriggered: false,
+      remediation: found > 0 ? "Rotation immédiate des credentials ; authentification par clés uniquement." : undefined,
+    });
+    return out;
+  },
+};
+
+/**
+ * Craquage de hashes faibles — john (cibles GIT : htpasswd, shadow, SSHA…
+ * détectés par motifs dans le dépôt cloné, wordlist john-data par défaut).
+ * Le scan craque AVEC LA WORDLIST SEULE : un hash non craqué n'est PAS une
+ * vulnérabilité — seul un mot de passe trouvé est un constat.
+ */
+const JOHN_HASH_PATTERNS: RegExp[] = [
+  /\$apr1\$[./A-Za-z0-9]{8}\$[./A-Za-z0-9]{22,}/, // Apache MD5 (apr1)
+  /\$1\$[./A-Za-z0-9]{8}\$[./A-Za-z0-9]{31}/, // md5crypt
+  /\$2[aby]\$\d{2}\$[./A-Za-z0-9]{53}/, // bcrypt
+  /\$5\$(?:rounds=\d+\$)?[./A-Za-z0-9]{0,16}\$[./A-Za-z0-9]{43}/, // sha256crypt
+  /\$6\$(?:rounds=\d+\$)?[./A-Za-z0-9]{0,16}\$[./A-Za-z0-9]{86}/, // sha512crypt
+  /\{SSHA\}[A-Za-z0-9+/=]{24,}/, // LDAP SSHA
+  /\{SHA\}[A-Za-z0-9+/=]{28}/, // LDAP SHA1
+];
+const JOHN_SKIP_DIRS = new Set([
+  ".git", "node_modules", "vendor", "__pycache__", ".next", "dist", "build", ".venv",
+]);
+const JOHN_TRIVIAL_PASSWORDS = new Set([
+  "password", "123456", "12345678", "admin", "root", "toor", "qwerty",
+  "letmein", "abc123", "changeme", "welcome", "monkey", "dragon", "iloveyou",
+]);
+
+const johnSpec: ArsenalSpec = {
+  tool: "JOHN",
+  bin: () => REAL_EXEC.johnBin,
+  versionArgs: ["--list=build-info"],
+  targets: ["GIT"],
+  cap: 100,
+  phases: [
+    [/loaded|formats|hashes/i, "CHARGEMENT HASHES", 30],
+    [/guess|crack|wordlist|rules/i, "CRAQUAGE WORDLIST", 70],
+    [/session|completed|done/i, "RAPPORT", 92],
+  ],
+  async checkExtra() {
+    if (!existsSync(REAL_EXEC.johnWordlist)) {
+      return {
+        available: false,
+        reason: `wordlist john introuvable (${REAL_EXEC.johnWordlist}) — installer john-data ou définir JOHN_WORDLIST`,
+      };
+    }
+    return null;
+  },
+  async build(ctx) {
+    const dir = await prepareTarget(ctx);
+    // 1) Balayage du dépôt cloné → collecte des lignes contenant des hashes.
+    const hashLines = new Set<string>();
+    let filesSeen = 0;
+    const walk = async (root: string, depth: number): Promise<void> => {
+      if (depth > 6 || filesSeen > 3000) return;
+      let entries;
+      try {
+        entries = await readdir(root, { withFileTypes: true });
+      } catch {
+        return; // répertoire illisible — ignoré
+      }
+      for (const e of entries) {
+        if (filesSeen > 3000) return;
+        const full = join(root, e.name);
+        if (e.isDirectory()) {
+          if (!JOHN_SKIP_DIRS.has(e.name)) await walk(full, depth + 1);
+          continue;
+        }
+        if (!e.isFile()) continue;
+        filesSeen++;
+        try {
+          const st = await stat(full);
+          if (st.size > 2 * 1024 * 1024) continue; // fichier volumineux — hors périmètre
+          const content = await readFile(full, "utf8");
+          if (content.slice(0, 1000).includes("\u0000")) continue; // binaire
+          for (const line of content.split("\n")) {
+            const trimmed = line.trim().slice(0, 400);
+            if (!trimmed) continue;
+            for (const re of JOHN_HASH_PATTERNS) {
+              if (re.test(trimmed)) {
+                hashLines.add(trimmed);
+                break;
+              }
+            }
+          }
+        } catch {
+          /* fichier illisible (binaire/permissions) — ignoré */
+        }
+      }
+    };
+    await walk(dir.value, 0);
+    const modePath = join(ctx.workdir, "john-mode.json");
+    const hashFile = join(ctx.workdir, "hashes.txt");
+    if (hashLines.size === 0) {
+      // Aucun hash dans le dépôt : john tourne en mode inventaire (sans crack)
+      // et le parse rend un constat INFO honnête (mode "none" consigné).
+      await writeFile(modePath, JSON.stringify({ mode: "none", hashes: 0 }), "utf8");
+      return {
+        args: ["--list=formats"],
+        reportPath: null,
+        cmdLabel: `john --list=formats (aucun hash détecté dans ${dir.cloned ? "le dépôt cloné" : dir.value})`,
+      };
+    }
+    await writeFile(hashFile, [...hashLines].join("\n") + "\n", "utf8");
+    await writeFile(modePath, JSON.stringify({ mode: "crack", hashes: hashLines.size }), "utf8");
+    const args = [`--wordlist=${REAL_EXEC.johnWordlist}`, "--no-log"];
+    if (ctx.profile === "DEEP") args.push("--rules"); // mangles wordlist (DEEP uniquement)
+    args.push(hashFile);
+    return {
+      args,
+      reportPath: null, // parsing du stdout capturé (guesses live de john)
+      cmdLabel: `john --wordlist=password.lst${ctx.profile === "DEEP" ? " --rules" : ""} hashes.txt (${hashLines.size} hash(s) détecté(s) dans le dépôt)`,
+    };
+  },
+  async parse({ stdout, ctx }) {
+    let mode: { mode?: string; hashes?: number } = {};
+    try {
+      const raw = await readFile(join(ctx.workdir, "john-mode.json"), "utf8");
+      mode = JSON.parse(raw) as { mode?: string; hashes?: number };
+    } catch {
+      mode = {};
+    }
+    const out: RealFinding[] = [];
+    if (mode.mode !== "crack") {
+      out.push({
+        title: "John : aucun hash de mot de passe détecté dans le dépôt", severity: "INFO",
+        confidence: "CONFIRMED", category: "secrets", cve: null, cvss: null, location: undefined,
+        description:
+          "Le balayage du dépôt (htpasswd, shadow, LDAP, bcrypt/md5crypt/sha256crypt/sha512crypt) n'a trouvé " +
+          "aucun hash de mot de passe à évaluer. Aucun credential faible exposable via le dépôt.",
+        evidence: `Motifs testés : apr1, md5crypt ($1$), bcrypt ($2a/b/y$), sha256crypt ($5$), sha512crypt ($6$), {SSHA}, {SHA}.`,
+        sentinelTriggered: false,
+      });
+      return out;
+    }
+    const text = stdout.join("\n");
+    const loaded = /Loaded (\d+) password hash/i.exec(text);
+    const loadedCount = loaded ? Number(loaded[1]) : (mode.hashes ?? 0);
+    const guessRe = /^(.+?)\s{2,}\(([^)]+)\)$/;
+    let cracked = 0;
+    for (const line of stdout) {
+      const l = line.trim();
+      if (!l || /^(loaded|remaining|will run|using|note|press|warning|session|rule|thread)/i.test(l)) continue;
+      const m = guessRe.exec(l);
+      if (!m) continue;
+      const password = m[1].trim();
+      const where = m[2].trim();
+      if (!password || /^(loaded|remaining|will run|using|note|press|warning|session)/i.test(password)) continue;
+      cracked++;
+      const trivial = JOHN_TRIVIAL_PASSWORDS.has(password.toLowerCase());
+      out.push({
+        title: `Mot de passe faible craqué : ${where.split(":").pop() ?? where} → « ${password.slice(0, 40)} »`,
+        severity: trivial ? "CRITICAL" : "HIGH",
+        confidence: "CONFIRMED", category: "secrets", cve: null,
+        cvss: trivial ? 9.1 : 7.4,
+        location: where || undefined,
+        description:
+          `John the Ripper a craqué le hash (${where}) avec la wordlist par défaut : le mot de passe « ${password} » ` +
+          (trivial ? "est un mot de passe TRIVIAL présent dans toutes les dictionnaires. " : "a été retrouvé en quelques secondes. ") +
+          "Toute dépendance d'authentification sur ce hash (htpasswd, LDAP, système) est compromise.",
+        evidence: evidenceBlock([
+          `hash : ${where}`,
+          `mot de passe craqué : ${password}`,
+          `trivial : ${trivial ? "oui (dictionnaire de base)" : "non"}`,
+        ]),
+        poc: `john --wordlist=/usr/share/john/password.lst <hashfile>`,
+        sentinelTriggered: false,
+        remediation:
+          "Changer immédiatement le mot de passe concerné ; appliquer une politique de complexité et un hachage " +
+          "lent (bcrypt/argon2id) ; retirer les fichiers de credentials du dépôt.",
+      });
+      if (cracked >= 30) break; // plafond interne (le cap global re-tronque)
+    }
+    out.push({
+      title: `john : ${loadedCount} hash(s) détecté(s) dans le dépôt — ${cracked} craqué(s) (wordlist par défaut)`,
+      severity: cracked > 0 ? "HIGH" : "INFO", confidence: "CONFIRMED", category: "secrets",
+      cve: null, cvss: null, location: undefined,
+      description:
+        `Synthèse John the Ripper : ${loadedCount} hash(s) de mot de passe détecté(s) dans le dépôt analysé, ` +
+        `${cracked} craqué(s) avec la wordlist standard${mode.mode === "crack" ? "" : ""}. ` +
+        "Les hashes non craqués ne constituent PAS une vulnérabilité — seul un mot de passe retrouvé est un constat individuel.",
+      evidence: evidenceBlock([`hashes détectés : ${loadedCount}`, `craqués : ${cracked}`]),
+      sentinelTriggered: false,
+      remediation: cracked > 0 ? "Rotation des credentials craqués + hachage lent (bcrypt/argon2id) + purge du dépôt." : undefined,
+    });
+    return out;
+  },
+};
+
 // ─── Registre exporté ────────────────────────────────────────────────
 
-/** P5 : specs des 11 outils evergreen (clé = id Tool). */
+/** P5 + Sprint 1 : specs des 18 outils evergreen (clé = id Tool). */
 export const ARSENAL_SPECS = {
   SUBFINDER: subfinderSpec,
   AMASS: amassSpec,
@@ -1491,4 +2287,11 @@ export const ARSENAL_SPECS = {
   GITLEAKS: gitleaksSpec,
   SQLMAP: sqlmapSpec,
   FFUF: ffufSpec,
+  WPSCAN: wpscanSpec,
+  DALFOX: dalfoxSpec,
+  WHATWEB: whatwebSpec,
+  TESTSSL: testsslSpec,
+  WAFW00F: wafw00fSpec,
+  HYDRA: hydraSpec,
+  JOHN: johnSpec,
 } as const satisfies Record<string, ArsenalSpec>;

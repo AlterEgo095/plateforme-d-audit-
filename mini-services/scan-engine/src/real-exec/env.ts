@@ -115,6 +115,18 @@ export const REAL_EXEC = {
   /** Wordlist de ffuf — vérifiée à la disponibilité (manquante → outil honnêtement indisponible). */
   ffufWordlist: (process.env.FFUF_WORDLIST ?? "/usr/share/seclists/Discovery/Web-Content/common.txt").trim(),
 
+  // ── Sprint 1 « élargissement » — binaires additionnels (surcharges par env) ──
+  wpscanBin: (process.env.WPSCAN_BIN ?? "wpscan").trim(),
+  dalfoxBin: (process.env.DALFOX_BIN ?? "dalfox").trim(),
+  whatwebBin: (process.env.WHATWEB_BIN ?? "whatweb").trim(),
+  /** testssl.sh — wrapper pointant vers /opt/testssl.sh (openssl dédié préservé). */
+  testsslBin: (process.env.TESTSSL_BIN ?? "testssl.sh").trim(),
+  wafw00fBin: (process.env.WAFW00F_BIN ?? "wafw00f").trim(),
+  hydraBin: (process.env.HYDRA_BIN ?? "hydra").trim(),
+  johnBin: (process.env.JOHN_BIN ?? "john").trim(),
+  /** Wordlist john (paquet john-data) — vérifiée à la disponibilité. */
+  johnWordlist: (process.env.JOHN_WORDLIST ?? "/usr/share/john/password.lst").trim(),
+
   /** Durées estimées (ms) pour l'affichage de progression des scans réels. */
   estimatedMs: (tool: Tool, profile: Profile): number => {
     const baseMinutes =
@@ -136,6 +148,14 @@ export const REAL_EXEC = {
           GITLEAKS: { QUICK: 2, STANDARD: 4, DEEP: 10 } as Record<string, number>,
           SQLMAP: { QUICK: 8, STANDARD: 20, DEEP: 45 } as Record<string, number>,
           FFUF: { QUICK: 3, STANDARD: 7, DEEP: 18 } as Record<string, number>,
+          // Sprint 1 — élargissement arsenal
+          WPSCAN: { QUICK: 4, STANDARD: 10, DEEP: 20 } as Record<string, number>,
+          DALFOX: { QUICK: 5, STANDARD: 12, DEEP: 30 } as Record<string, number>,
+          WHATWEB: { QUICK: 1, STANDARD: 2, DEEP: 4 } as Record<string, number>,
+          TESTSSL: { QUICK: 6, STANDARD: 12, DEEP: 25 } as Record<string, number>,
+          WAFW00F: { QUICK: 1, STANDARD: 2, DEEP: 4 } as Record<string, number>,
+          HYDRA: { QUICK: 3, STANDARD: 6, DEEP: 12 } as Record<string, number>,
+          JOHN: { QUICK: 2, STANDARD: 5, DEEP: 10 } as Record<string, number>,
         } as Record<string, Record<string, number>>
       )[tool] ?? { QUICK: 20, STANDARD: 45, DEEP: 90 };
     return (baseMinutes[profile] ?? 45) * 60_000;

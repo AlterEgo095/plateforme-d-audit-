@@ -1,0 +1,277 @@
+# ── AuditForge — orchestration complète (VPS auto-hébergé) ──────────────────
+# Usage :
+#   1. cp .env.example .env   puis renseignez AUTH_SECRET / ENGINE_INTERNAL_TOKEN
+#      (+ TOOL_EXECUTION_MODE=real et LLM_API_KEY pour l'exécution réelle)
+#   2. docker compose up -d --build
+#   3. Interface : http://<votre-domaine-ou-ip>/  (HTTPS automatique si SITE_DOMAIN est défini)
+#
+# Architecture réseau : seul Caddy est exposé (80/443). `app`, `engine`,
+# `docker-proxy` et `llm-bridge` vivent sur le réseau interne Docker — aucun
+# n'est publié sur l'hôte.
+
+name: auditforge
+
+services:
+  # ── Application Next.js : frontend + API REST ─────────────────────────────
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: file:/data/auditforge.db
+      AUTH_SECRET: ${AUTH_SECRET:?Renseignez AUTH_SECRET dans le fichier .env (openssl rand -hex 32)}
+      ENGINE_INTERNAL_TOKEN: ${ENGINE_INTERNAL_TOKEN:?Renseignez ENGINE_INTERNAL_TOKEN dans le fichier .env (openssl rand -hex 32)}
+      ENGINE_URL: http://engine:3030
+      # ── Comptes au premier démarrage (C2) ──
+      # Par défaut (production) : AUCUN compte de démonstration. Définissez le
+      # premier administrateur dans le .env, ou forcez DEMO_SEED=1 (démo only).
+      DEMO_SEED: ${DEMO_SEED:-0}
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+      # ── F-04bis : allowlist opérateur de cibles internes (protection SSRF) ──
+      # Vide (défaut) : garde SSRF strict — aucun hôte privé/interne accepté.
+      # Hosts EXACTS (virgules) autorisés explicitement par l'opérateur
+      # (fixtures de test locales du VPS, ex. TARGET_HOST_ALLOWLIST=172.17.0.1).
+      TARGET_HOST_ALLOWLIST: ${TARGET_HOST_ALLOWLIST:-}
+    volumes:
+      - auditforge-data:/data
+    restart: unless-stopped
+    # Aucun `ports:` : l'application n'est joignable que via le reverse proxy.
+
+  # ── Proxy Docker (P0.3 audit v2) — remplace le docker.sock brut du moteur ──
+  # Le moteur ne parle plus directement au démon Docker de l'hôte : il passe
+  # par ce proxy qui ne laisse ouverts que les endpoints nécessaires aux
+  # sandboxes (containers/images/networks/volumes/events + POST), et bloque
+  # build/exec/secrets/swarm/system (attaque conteneur privilégié → hôte).
+  docker-proxy:
+    image: tecnativa/docker-socket-proxy:0.3.0
+    environment:
+      # ── Endpoints autorisés (minimum requis par phantom/basalt) ──
+      PING: 1          # /_ping (handshake CLI)
+      VERSION: 1       # /version (négociation CLI ⇄ démon)
+      INFO: 1          # /info (docker info / contexte)
+      CONTAINERS: 1    # create/start/attach/wait/archive(cp)/inspect/rm
+      IMAGES: 1        # inspect + pull (POST /images/create)
+      EVENTS: 1        # boucles d'attente des CLI docker
+      NETWORKS: 1      # inspection réseau de la sandbox
+      VOLUMES: 1       # volumes éventuels de la sandbox
+      POST: 1          # indispensable : create/start/wait/pull
+      # ── Tout le reste est REFUSÉ (défaut 0) ──
+      BUILD: 0
+      COMMIT: 0
+      EXEC: 0
+      SYSTEM: 0
+      SECRETS: 0
+      SERVICES: 0
+      SWARM: 0
+      TASKS: 0
+      NODES: 0
+      PLUGINS: 0
+      CONFIGS: 0
+      SESSION: 0
+      DISTRIBUTION: 0
+      AUTH: 0
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    restart: unless-stopped
+    # P1 : healthcheck /_ping — le moteur n'attend plus un simple « démarré »
+    # mais un proxy effectivement joignable (scans réels opérationnels au boot).
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:2375/_ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+    # Aucun `ports:` : l'API du proxy n'est joignable que sur le réseau interne
+    # (tcp://docker-proxy:2375). NB : ne PAS publier 2375 sur une IP gateway —
+    # le hairpin NAT échoue depuis les conteneurs (i/o timeout).
+
+  # ── Moteur d'exécution des scans (socket.io + /internal/* + outils réels) ──
+  engine:
+    build:
+      context: .
+      dockerfile: scripts/Dockerfile.engine
+      # ── P5 « Arsenal » : compilation des 5 outils Go (subfinder/amass/httpx/
+      # nuclei/ffuf) dans l'étage go-builder + installation des outils non-Go
+      # (nikto/sqlmap/semgrep/trivy/gitleaks + seclists) dans le runner.
+      # Sans ces args : outils en simulation honnête (sonde par binaire).
+      args:
+        WITH_ARSENAL: "1"
+        WITH_SECLISTS: "1"
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: file:/data/auditforge.db
+      AUTH_SECRET: ${AUTH_SECRET:?Renseignez AUTH_SECRET dans le fichier .env (openssl rand -hex 32)}
+      ENGINE_INTERNAL_TOKEN: ${ENGINE_INTERNAL_TOKEN:?Renseignez ENGINE_INTERNAL_TOKEN dans le fichier .env (openssl rand -hex 32)}
+      BIND_HOST: 0.0.0.0
+      # ── Limites de ressources ──
+      MAX_CONCURRENT_SCANS: ${MAX_CONCURRENT_SCANS:-3}
+      # CORS socket.io : URL publique du site (si définie dans le .env)
+      SITE_ORIGIN: ${SITE_ORIGIN:-}
+      # ── Exécution réelle des outils ──
+      # simulation : aucune cible touchée | auto : réel si disponible | real : réel strict
+      TOOL_EXECUTION_MODE: ${TOOL_EXECUTION_MODE:-auto}
+      # ── F-04bis : allowlist opérateur (symétrique app/src/lib/dto.ts) —
+      # hosts EXACTS admis malgré la liste noire privée/interne du garde moteur
+      # (target-guard.ts) : fixtures de test locales (192.168.0.1 = passerelle
+      # Docker du VPS). Vide (défaut) : garde SSRF stricte.
+      TARGET_HOST_ALLOWLIST: ${TARGET_HOST_ALLOWLIST:-}
+      # Token API wpscan.com (gratuit, 25 req/j) — active l'énumération
+      # « vulnérables » (vp,vt) ; sans token : fingerprinting dégradé honnête.
+      WPSCAN_API_TOKEN: ${WPSCAN_API_TOKEN:-}
+      # Docker passe par le proxy interne (P0.3) — DOCKER_HOST est dans
+      # l'allowlist sanitizedEnv (proc.ts) → transmis aux CLI phantom/basalt.
+      # NB : phantom._resolve_docker_host() est patché (Dockerfile.engine,
+      # correctif n°2bis) pour IGNORER le hostname de DOCKER_HOST et toujours
+      # retourner host.docker.internal — c'est LÀ que la sandbox publie son
+      # tool-server (ports hôte), pas sur le conteneur proxy.
+      DOCKER_HOST: ${DOCKER_HOST:-tcp://docker-proxy:2375}
+      # ── RF2 (audit v2) : OWASP ZAP via side-car — ZAP_API_URL définie →
+      # l'adaptateur ZAP du moteur pilote l'API REST du daemon (aucun binaire
+      # local requis). Sans ZAP_API_URL : simulation honnête.
+      ZAP_API_URL: ${ZAP_API_URL:-http://zap:8080}
+      ZAP_API_KEY: ${ZAP_API_KEY:-}
+      # LLM des outils réels — endpoint OpenAI-compatible :
+      #   Z.ai direct : https://api.z.ai/api/paas/v4  (clé dans LLM_API_KEY)
+      #   pont local  : http://llm-bridge:3031/v1
+      LLM_API_BASE: ${LLM_API_BASE:-https://api.z.ai/api/paas/v4}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      PHANTOM_LLM: ${PHANTOM_LLM:-openai/glm-4.6}
+      # Compresseur mémoire phantom (défaut classe = DeepSeek-V3.2 sans préfixe →
+      # litellm "LLM Provider NOT provided" ×2400). Même modèle que PHANTOM_LLM.
+      PHANTOM_COMPRESSOR_LLM: ${PHANTOM_COMPRESSOR_LLM:-}
+      BASALT_MODEL: ${BASALT_MODEL:-glm-4.6}
+      # Sandbox Kali enrichie (outils supplémentaires — voir Dockerfile.sandbox).
+      # Vide = image amont ghcr.io/usta0x001/phantom-sandbox:latest.
+      PHANTOM_IMAGE: ${PHANTOM_IMAGE:-}
+      REAL_SCAN_TIMEOUT_MIN: ${REAL_SCAN_TIMEOUT_MIN:-180}
+      # ── Plateformes distantes (DeepAudit / RedAmon) ──
+      # Déployez chaque plateforme (docker compose de son dépôt — voir README)
+      # puis déclarez la connexion ; sans ces variables : simulation honnête.
+      # DeepAudit doit être joignable depuis ce conteneur (réseau Docker ou hôte).
+      DEEPAUDIT_API_URL: ${DEEPAUDIT_API_URL:-}
+      DEEPAUDIT_EMAIL: ${DEEPAUDIT_EMAIL:-}
+      DEEPAUDIT_PASSWORD: ${DEEPAUDIT_PASSWORD:-}
+      REDAMON_API_URL: ${REDAMON_API_URL:-}
+      REDAMON_EMAIL: ${REDAMON_EMAIL:-}
+      REDAMON_PASSWORD: ${REDAMON_PASSWORD:-}
+    volumes:
+      - auditforge-data:/data
+      # P0.3 : plus AUCUN docker.sock monté ici — le moteur passe par le
+      # proxy interne `docker-proxy` (voir service ci-dessus).
+    restart: unless-stopped
+    stop_grace_period: 150s # P0.4 : SHUTDOWN_GRACE_MS=90s + marge (audit v2)
+    depends_on:
+      app:
+        condition: service_healthy # le schéma est appliqué au boot de `app`
+      docker-proxy:
+        condition: service_healthy # P1 : scans réels impossibles sans proxy
+    # Aucun `ports:` : moteur strictement confiné au réseau interne Docker.
+
+  # ── Sauvegarde planifiée (P1 — suite P0-1) ────────────────────────────────
+  # Sidecar : sauvegarde froide de la base (checkpoint WAL + intégrité +
+  # rotation KEEP) dans le répertoire hôte /opt/auditforge/backups — les
+  # sauvegardes survivent à `docker compose down -v`. 1ʳᵉ sauvegarde immédiate
+  # au démarrage, puis une toutes les BACKUP_INTERVAL_SECONDS (24 h). Filet
+  # redondant avec le cron hôte (30 5 * * *) — les deux vérifient l'intégrité.
+  # Restauration : scripts/auditforge-restore.sh.
+  backup:
+    build:
+      context: .
+      dockerfile: scripts/Dockerfile.backup
+    environment:
+      DB_PATH: /data/auditforge.db
+      BACKUP_DIR: /backups
+      KEEP: ${BACKUP_KEEP:-7}
+      # Période entre deux sauvegardes (défaut : 24 h ; 1re au démarrage).
+      BACKUP_INTERVAL_SECONDS: ${BACKUP_INTERVAL_SECONDS:-86400}
+    volumes:
+      - auditforge-data:/data # lecture + checkpoint WAL (écriture pragma)
+      # Répertoire hôte des sauvegardes (survolable : ls -lh /opt/auditforge/backups)
+      - /opt/auditforge/backups:/backups
+    restart: unless-stopped
+    mem_limit: 128m # pattern maison VPS (voir docker-compose.override.yml)
+    cpus: 0.25
+    depends_on:
+      app:
+        condition: service_healthy # la base existe (schéma appliqué)
+    # Aucun `ports:` ; aucun accès Docker — conteneur minimal sans privilège.
+
+  # ── Pont LLM OpenAI-compatible (Z.ai) — optionnel ──────────────────────────
+  # Utile pour exposer un endpoint /v1 unique aux outils sans y placer la clé.
+  # Sans clé Z.ai intégrée au SDK hors sandbox : préférez LLM_API_BASE direct.
+  # llm-bridge:
+  #   build:
+  #     context: .
+  #     dockerfile: Dockerfile.bridge
+  #   environment:
+  #     LLM_BRIDGE_KEY: ${LLM_BRIDGE_KEY:-}
+  #     BIND_HOST: 0.0.0.0
+  #   restart: unless-stopped
+
+  # ── OWASP ZAP (RF2 — audit v2) : daemon DAST en side-car ───────────────────
+  # L'adaptateur ZAP du moteur pilote l'API REST (http://zap:8080). Aucun
+  # `ports:` : joignable uniquement depuis le réseau interne compose.
+  zap:
+    image: ghcr.io/zaproxy/zaproxy:stable
+    command: >
+      zap.sh -daemon -host 0.0.0.0 -port 8080
+      -config api.addrs.addr.name=.*
+      -config api.addrs.addr.regex=true
+      -config api.key=${ZAP_API_KEY}
+      -config api.disablekey=false
+    environment:
+      ZAP_API_KEY: ${ZAP_API_KEY:?Renseignez ZAP_API_KEY dans le .env (openssl rand -hex 32) — le daemon ZAP refuse une clé vide}
+    volumes:
+      - zap-data:/zap/.ZAP # sessions/plugins persistants entre redémarrages
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL] # écoute 8080 (>1024) : aucune capability requise
+    mem_limit: ${ZAP_MEM_LIMIT:-1536m} # JVM DAST — cohabitation VPS partagé
+    cpus: "${ZAP_CPUS:-1.5}"
+    pids_limit: 512
+    stop_grace_period: 60s # le daemon doit finaliser ses sessions
+
+  # ── Pont LLM OpenAI-compatible (image locale auditforge-llm-bridge:v2) ─────
+  # Multi-upstream avec cooldown/failover — reconstruction depuis le conteneur
+  # vivant (config d'ère tunnel, non committée). Publié UNIQUEMENT sur la
+  # passerelle Docker (172.17.0.1:3031) — jamais sur Internet. L'override
+  # compose (docker-compose.override.yml) y ajoute AF_POOL_WAIT_MS=10000.
+  llm-bridge:
+    image: auditforge-llm-bridge:v2
+    restart: unless-stopped
+    ports:
+      - "172.17.0.1:3031:3031"
+    environment:
+      NODE_ENV: production
+      BIND_HOST: 0.0.0.0
+      LLM_BRIDGE_KEY: ${LLM_BRIDGE_KEY:-}
+      AF_STATIC_MODELS: ${AF_STATIC_MODELS:-}
+      AF_UPSTREAMS: ${AF_UPSTREAMS:-}
+
+  # ── Reverse proxy : unique point d'entrée (80/443) ────────────────────────
+  caddy:
+    image: caddy:2-alpine
+    ports:
+      - "${HTTP_PORT:-80}:80"
+      - "${HTTPS_PORT:-443}:443"
+    environment:
+      SITE_DOMAIN: ${SITE_DOMAIN:-:80}
+    volumes:
+      - ./Caddyfile.docker:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    restart: unless-stopped
+    depends_on:
+      app:
+        condition: service_healthy
+      engine:
+        condition: service_started
+
+volumes:
+  auditforge-data: # base SQLite partagée (app ⇄ moteur, mode WAL)
+  zap-data: # sessions/plugins OWASP ZAP (side-car, RF2)
+  caddy-data: # certificats TLS (HTTPS automatique)
+  caddy-config:

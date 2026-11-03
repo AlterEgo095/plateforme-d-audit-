@@ -1673,19 +1673,32 @@ const wpscanSpec: ArsenalSpec = {
   async build(ctx) {
     const probe = baseOfUrl(ctx.target);
     const reportPath = join(ctx.workdir, "wpscan.json");
-    const enums =
-      ctx.profile === "QUICK" ? "vp,vt"
-      : ctx.profile === "STANDARD" ? "vp,vt,u"
-      : "vp,vt,u,cb,dbe,bf"; // DEEP : + config-backups, db-exports, backup-folders
+    // WPScan v4 : l'énumération « vulnérables » (vp,vt) exige un token API
+    // wpscan.com (gratuit, 25 req/jour) — sans lui le scan AVORTE (code 4,
+    // « An API token is required for vulnerable plugin/theme enumeration »).
+    // Dégradation gracieuse : sans WPSCAN_API_TOKEN, on énumère le
+    // FINGERPRINTING (plugins/thèmes populaires, utilisateurs, artefacts,
+    // version du cœur) qui n'exige PAS de token ; avec token, l'énumération
+    // vulnérables complète.
+    const apiToken = (process.env.WPSCAN_API_TOKEN ?? "").trim();
+    const enums = apiToken
+      ? (ctx.profile === "QUICK" ? "vp,vt"
+        : ctx.profile === "STANDARD" ? "vp,vt,u"
+        : "vp,vt,u,cb,dbe,bf") // DEEP : + config-backups, db-exports, backup-folders
+      : (ctx.profile === "QUICK" ? "p,t"
+        : ctx.profile === "STANDARD" ? "p,t,u"
+        : "ap,at,u,cb,dbe,bf");
+    const args = [
+      "--url", probe, "--format", "json", "--output", reportPath,
+      "--no-banner", "--no-update", "--random-user-agent",
+      "--request-timeout", "15", "--connect-timeout", "10",
+      "--enumerate", enums,
+    ];
+    if (apiToken) args.push("--api-token", apiToken);
     return {
-      args: [
-        "--url", probe, "--format", "json", "--output", reportPath,
-        "--no-banner", "--no-update", "--random-user-agent",
-        "--request-timeout", "15", "--connect-timeout", "10",
-        "--enumerate", enums,
-      ],
+      args,
       reportPath,
-      cmdLabel: `wpscan --url ${probe} --format json --enumerate ${enums} --no-update --random-user-agent`,
+      cmdLabel: `wpscan --url ${probe} --format json --enumerate ${enums}${apiToken ? " --api-token (fourni)" : ""} --no-update --random-user-agent`,
     };
   },
   async parse({ reportPath }) {

@@ -269,6 +269,19 @@ function extractNetworkHostPort(target: string): { host: string; port: string | 
 }
 
 /**
+ * F-04bis : allowlist opérateur — hosts EXACTS (minuscules, séparés par des
+ * virgules, via TARGET_HOST_ALLOWLIST) que l'opérateur autorise explicitement
+ * malgré la liste noire privée/interne (ex. fixtures de test hébergées sur le
+ * VPS lui-même : 172.17.0.1:809x). Correspondance exacte sur le hostname
+ * uniquement — jamais de suffixe/wildcard. Vide (défaut) : le garde SSRF
+ * reste strict, aucun contournement implicite.
+ */
+const TARGET_HOST_ALLOWLIST = (process.env.TARGET_HOST_ALLOWLIST ?? '')
+  .split(',')
+  .map((s) => s.trim().toLowerCase())
+  .filter(Boolean)
+
+/**
  * Valide une cible selon son type. Retourne un message d'erreur FR, ou null si
  * la cible est acceptée.
  */
@@ -297,7 +310,7 @@ export function validateTarget(targetType: TargetType, target: string): string |
   if (targetType === 'URL' || targetType === 'NETWORK') {
     const { host, port } =
       targetType === 'URL' ? extractUrlHostPort(t) : extractNetworkHostPort(t)
-    if (host && isForbiddenTargetHost(host)) {
+    if (host && isForbiddenTargetHost(host) && !TARGET_HOST_ALLOWLIST.includes(host)) {
       return 'Cible interdite : hôtes privés/internes non autorisés (protection SSRF)'
     }
     if (port === '0') {

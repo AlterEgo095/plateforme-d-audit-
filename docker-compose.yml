@@ -57,6 +57,11 @@ services:
       DEMO_SEED: ${DEMO_SEED:-0}
       ADMIN_USERNAME: ${ADMIN_USERNAME:-}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+      # ── F-04bis : allowlist opérateur de cibles internes (protection SSRF) ──
+      # Vide (défaut) : garde SSRF strict — aucun hôte privé/interne accepté.
+      # Hosts EXACTS (virgules) autorisés explicitement par l'opérateur
+      # (fixtures de test locales du VPS, ex. TARGET_HOST_ALLOWLIST=172.17.0.1).
+      TARGET_HOST_ALLOWLIST: ${TARGET_HOST_ALLOWLIST:-}
     volumes:
       - auditforge-data:/data
     restart: unless-stopped

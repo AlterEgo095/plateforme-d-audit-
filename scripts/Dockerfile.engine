@@ -142,6 +142,44 @@ RUN if [ "$WITH_ARSENAL" = "1" ]; then set -eux; \
       && nuclei -update-templates || echo "(warning) nuclei -update-templates a échoué — les templates seront téléchargés au premier scan"; \
     fi
 
+# ── 3bis) Sprint 1 « élargissement de l'arsenal » — 7 outils additionnels ───
+# Même garde WITH_ARSENAL que le bloc 3 : wpscan (gem Ruby — nokogiri/ffi
+# précompilés, build-essential en secours), whatweb v0.6.4 et testssl.sh
+# v3.2.4 (tarballs sources ; wrappers /usr/local/bin qui préservent leur
+# répertoire — requis pour que testssl.sh trouve son openssl dédié dans
+# ./bin), dalfox v3.2.4 (binaire Go, release GitHub épinglée), hydra +
+# john(+john-data : wordlist /usr/share/john/password.lst) via apt, wafw00f
+# via pip. Symlinks john/hydra : le binaire Debian peut vivre dans /usr/sbin
+# (toujours couvert ici quel que soit le PATH).
+RUN if [ "$WITH_ARSENAL" = "1" ]; then set -eux; \
+      apt-get update -y \
+      && apt-get install -y --no-install-recommends \
+           hydra john john-data dnsutils ruby ruby-dev build-essential \
+      && ln -sf "$(command -v john)" /usr/local/bin/john \
+      && ln -sf "$(command -v hydra)" /usr/local/bin/hydra \
+      && pip install --no-cache-dir wafw00f \
+      && curl -fsSL -o /tmp/dalfox.tgz \
+           "https://github.com/hahwul/dalfox/releases/download/v3.2.4/dalfox-v3.2.4-linux-x86_64.tar.gz" \
+      && mkdir -p /tmp/dalfox && tar xzf /tmp/dalfox.tgz -C /tmp/dalfox \
+      && install -m 0755 "$(find /tmp/dalfox -type f -name dalfox | head -1)" /usr/local/bin/dalfox \
+      && rm -rf /tmp/dalfox /tmp/dalfox.tgz \
+      && gem install --no-document wpscan \
+      && curl -fsSL -o /tmp/whatweb.tgz \
+           "https://github.com/urbanadventurer/WhatWeb/archive/refs/tags/v0.6.4.tar.gz" \
+      && tar xzf /tmp/whatweb.tgz -C /opt \
+      && mv /opt/WhatWeb-0.6.4 /opt/whatweb && rm /tmp/whatweb.tgz \
+      && gem install --no-document ipaddr addressable json \
+      && printf '#!/bin/sh\nexec /opt/whatweb/whatweb "$@"\n' > /usr/local/bin/whatweb \
+      && chmod +x /usr/local/bin/whatweb \
+      && curl -fsSL -o /tmp/testssl.tgz \
+           "https://github.com/testssl/testssl.sh/archive/refs/tags/v3.2.4.tar.gz" \
+      && tar xzf /tmp/testssl.tgz -C /opt \
+      && mv /opt/testssl.sh-3.2.4 /opt/testssl.sh && rm /tmp/testssl.tgz \
+      && printf '#!/bin/sh\nexec /opt/testssl.sh/testssl.sh "$@"\n' > /usr/local/bin/testssl.sh \
+      && chmod +x /usr/local/bin/testssl.sh \
+      && rm -rf /var/lib/apt/lists/* /root/.cache; \
+    fi
+
 # Wordlist ffuf (seclists) — incluse avec WITH_ARSENAL ; chemin surchargeable
 # par FFUF_WORDLIST (défaut du moteur : /usr/share/seclists/Discovery/Web-Content/common.txt).
 # NB : le paquet Debian « seclists » a disparu de trixie — on clone le dépôt

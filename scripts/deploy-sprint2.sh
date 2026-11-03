@@ -6,11 +6,16 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-VPS="cd vps-tools && bun run vps.ts"
+# Fonction (et non variable) : un alias en variable serait découpé par
+# word-splitting sans réinterprétation des opérateurs (&&) — bug « too many arguments ».
+# Exécution depuis la racine projet : `put` résout les chemins LOCAUX relatifs
+# au CWD (les chemins du script sont racine-relatifs) ; .env.local est lu
+# depuis le dossier de vps.ts lui-même (import.meta.url) — pas de dépendance CWD.
+vps() { (bun run vps-tools/vps.ts "$@"); }
 R=/opt/auditforge
 
 echo "── 1/5 — Garde-fou : aucun scan en cours ─────────────────────────────"
-$VPS exec "sudo docker exec auditforge-app-1 bun -e 'const {PrismaClient}=require(\"@prisma/client\");const p=new PrismaClient();p.scan.findMany({where:{status:{in:[\"RUNNING\",\"QUEUED\"]}}}).then(s=>{console.log(\"ACTIFS:\"+s.length);process.exit(s.length?1:0)})'" || {
+vps exec "sudo docker exec auditforge-app-1 bun -e 'const {PrismaClient}=require(\"@prisma/client\");const p=new PrismaClient();p.scan.findMany({where:{status:{in:[\"RUNNING\",\"QUEUED\"]}}}).then(s=>{console.log(\"ACTIFS:\"+s.length);process.exit(s.length?1:0)})'" || {
   echo "!! Des scans sont actifs — attendre/arrêter avant rebuild app."; exit 1; }
 
 echo "── 2/5 — Envoi des fichiers app (Sprint 2) ───────────────────────────"
@@ -33,21 +38,21 @@ for f in \
   src/components/audit/cases-view.tsx \
   src/components/audit/status-badges.tsx ; do
   echo "  put $f"
-  $VPS put "$f" "$R/$f"
+  vps put "$f" "$R/$f"
 done
 
 echo "── 3/5 — Rebuild image app (prisma generate + next build) ────────────"
-$VPS exec "cd $R && sudo docker compose build app" &
+vps exec "cd $R && sudo docker compose build app" &
 BUILD_PID=$!
 echo "  build lancé (pid $BUILD_PID) — polling…"
 wait $BUILD_PID
 
 echo "── 4/5 — Redémarrage app + migrations (db push additif) ──────────────"
-$VPS exec "cd $R && sudo docker compose up -d app && sleep 10 && sudo docker compose ps app"
-$VPS exec "sudo docker exec auditforge-app-1 bun -e 'const {PrismaClient}=require(\"@prisma/client\");const p=new PrismaClient();p.case.count().then(c=>{console.log(\"CASES:\",c);process.exit(0)}).catch(e=>{console.log(\"ERR:\",e.message.slice(0,120));process.exit(1)})' || (cd $R && sudo docker compose exec -T app bunx prisma db push --skip-generate)"
+vps exec "cd $R && sudo docker compose up -d app && sleep 10 && sudo docker compose ps app"
+vps exec "sudo docker exec auditforge-app-1 bun -e 'const {PrismaClient}=require(\"@prisma/client\");const p=new PrismaClient();p.case.count().then(c=>{console.log(\"CASES:\",c);process.exit(0)}).catch(e=>{console.log(\"ERR:\",e.message.slice(0,120));process.exit(1)})' || (cd $R && sudo docker compose exec -T app bunx prisma db push --skip-generate)"
 
 echo "── 5/5 — Vérification HTTPS publique ─────────────────────────────────"
-$VPS exec "curl -s -o /dev/null -w '%{http_code}' https://auditforge.aenews.online/robots.txt" && echo " ← robots.txt"
-$VPS exec "curl -s -o /dev/null -w '%{http_code}' -X POST https://auditforge.aenews.online/api/cases -H 'Content-Type: application/json' -d '{}'" && echo " ← POST /api/cases (401 attendu — route présente)"
+vps exec "curl -s -o /dev/null -w '%{http_code}' https://auditforge.aenews.online/robots.txt" && echo " ← robots.txt"
+vps exec "curl -s -o /dev/null -w '%{http_code}' -X POST https://auditforge.aenews.online/api/cases -H 'Content-Type: application/json' -d '{}'" && echo " ← POST /api/cases (401 attendu — route présente)"
 
 echo "✅ Déploiement Sprint 2 terminé."

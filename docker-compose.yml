@@ -80,7 +80,16 @@ services:
   engine:
     build:
       context: .
-      dockerfile: Dockerfile.engine
+      # Source unique du Dockerfile moteur — le doublon racine (sans l'étage
+      # Go RF2 multi-stage) est supprimé ; chemin aligné sur le compose VPS.
+      dockerfile: scripts/Dockerfile.engine
+      # ── P5 « Arsenal » : compilation des 5 outils Go (subfinder/amass/httpx/
+      # nuclei/ffuf) + outils non-Go (nikto/sqlmap/semgrep/trivy/gitleaks) +
+      # seclists. Sans ces args : outils en simulation honnête (sonde par
+      # binaire). Valeurs explicites alignées sur le compose de production.
+      args:
+        WITH_ARSENAL: "1"
+        WITH_SECLISTS: "1"
     environment:
       NODE_ENV: production
       # connection_limit=1 + socket_timeout=30 : idem app (écritures concurrentes

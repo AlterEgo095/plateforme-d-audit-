@@ -218,6 +218,13 @@ RUN rm -rf /tmp/nuclei* || true
 COPY --from=oven/bun:1 /usr/local/bin/bun /usr/local/bin/bun
 COPY --from=build /engine /engine
 
+# Dépendances du wrapper navigateur (playwright-core) : le contexte de build
+# n'embarque PAS node_modules (.dockerignore « **/node_modules ») — install
+# lockfile dans l'image. La sonde `af-browser-tools --version` ci-dessous
+# importe playwright-core dès le chargement du CLI : sans cette étape, le
+# build échouerait (« Cannot find module playwright-core »).
+RUN cd /browser-tools && bun install --frozen-lockfile
+
 # Shim du CLI af-browser-tools — placé après le COPY de bun (le shim pointe
 # vers lui et la sonde --version doit passer au build).
 RUN printf '#!/bin/sh\nexec /usr/local/bin/bun /browser-tools/src/cli.ts "$@"\n' > /usr/local/bin/af-browser-tools \

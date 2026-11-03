@@ -2291,6 +2291,136 @@ const johnSpec: ArsenalSpec = {
 // ─── Registre exporté ────────────────────────────────────────────────
 
 /** P5 + Sprint 1 : specs des 18 outils evergreen (clé = id Tool). */
+// ─── Sprint 3 — navigateur headless (wrapper af-browser-tools) ─────────
+
+/**
+ * Sonde de disponibilité Chromium — MIROIR de browser-tools/src/resolve.ts
+ * (projets indépendants : AF_CHROMIUM_BIN → cache Playwright → PATH système).
+ * Déterminer l'indisponibilité ici donne un `realReason` honnête dans l'UI
+ * sans même tenter d'exécuter le wrapper.
+ */
+async function chromiumAvailability(): Promise<RealAvailability> {
+  const explicit = REAL_EXEC.chromiumBin;
+  if (explicit) {
+    return existsSync(explicit)
+      ? { available: true }
+      : { available: false, reason: `AF_CHROMIUM_BIN pointe vers un chemin inexistant (${explicit})` };
+  }
+  const home = process.env.HOME ?? "";
+  const pwRoot = home ? join(home, ".cache", "ms-playwright") : "";
+  if (pwRoot && existsSync(pwRoot)) {
+    let versions: string[] = [];
+    try {
+      versions = (await readdir(pwRoot)).filter((d) => d.startsWith("chromium-")).sort().reverse();
+    } catch {
+      versions = [];
+    }
+    for (const v of versions) {
+      for (const sub of ["chrome-linux64", "chrome-linux"]) {
+        const p = join(pwRoot, v, sub, "chrome");
+        if (existsSync(p)) return { available: true };
+      }
+    }
+  }
+  for (const sys of [
+    "/usr/bin/chromium",
+    "/usr/bin/chromium-browser",
+    "/usr/bin/google-chrome",
+    "/usr/bin/google-chrome-stable",
+  ]) {
+    if (existsSync(sys)) return { available: true };
+  }
+  return {
+    available: false,
+    reason:
+      "Chromium headless introuvable (~/.cache/ms-playwright ou PATH système) — installer le Chromium Playwright ou définir AF_CHROMIUM_BIN",
+  };
+}
+
+/**
+ * Parsing commun des 4 outils navigateur : le wrapper af-browser-tools écrit
+ * un JSON {findings:[…]} déjà normalisé (title/severity/confidence/category/
+ * cve/cvss/location/description/evidence/poc/remediation) — le mappage est
+ * quasi 1:1, `sentinelTriggered` toujours false (aucun PoC exécuté).
+ */
+async function parseBrowserReport(ctx: RealAdapterContext, reportPath: string | null): Promise<RealFinding[]> {
+  const raw = await readReport(reportPath);
+  if (!raw.trim()) return [];
+  let doc: {
+    ok?: boolean;
+    error?: string;
+    finalUrl?: string;
+    findings?: Array<Record<string, unknown>>;
+  };
+  try {
+    doc = JSON.parse(raw);
+  } catch {
+    return [];
+  }
+  const rows = Array.isArray(doc.findings) ? doc.findings : [];
+  const out: RealFinding[] = [];
+  for (const row of rows) {
+    const confidence = String(row.confidence ?? "PROBABLE").toUpperCase();
+    const cvss = Number(row.cvss);
+    out.push({
+      title: String(row.title ?? "Constat navigateur").slice(0, 500),
+      severity: normSeverity(row.severity, "MEDIUM"),
+      confidence:
+        confidence === "CONFIRMED" || confidence === "PROBABLE" || confidence === "UNVERIFIED"
+          ? (confidence as RealFinding["confidence"])
+          : "PROBABLE",
+      category: String(row.category ?? "web").slice(0, 120),
+      cve: row.cve ? String(row.cve).slice(0, 40) : null,
+      cvss: Number.isFinite(cvss) && cvss >= 0 && cvss <= 10 ? cvss : null,
+      location: String(row.location ?? doc.finalUrl ?? ctx.target).slice(0, 500),
+      description: String(row.description ?? "").slice(0, 3500),
+      evidence: String(row.evidence ?? "").slice(0, 4000),
+      poc: row.poc ? String(row.poc).slice(0, 2000) : undefined,
+      sentinelTriggered: false,
+      remediation: row.remediation ? String(row.remediation).slice(0, 2000) : undefined,
+    });
+  }
+  return out;
+}
+
+/** Factory des specs navigateur — même squelette, sous-commande différente. */
+function makeBrowserSpec(tool: Tool, command: string): ArsenalSpec {
+  return {
+    tool,
+    bin: () => REAL_EXEC.browserToolsBin,
+    versionArgs: ["--version"],
+    probeTimeoutMs: 20_000, // démarrage à froid de Bun + résolution Chromium
+    targets: ["URL"],
+    cap: 120,
+    phases: [
+      [/chromium|navigation/i, "RENDU NAVIGATEUR", 30],
+      [/analyse/i, "ANALYSE DOM", 70],
+      [/rapport écrit|terminé/i, "CONSOLIDATION", 92],
+    ],
+    async checkExtra() {
+      return chromiumAvailability();
+    },
+    async build(ctx) {
+      const probe = httpProbeTarget(ctx.target, ctx.targetType);
+      const reportPath = join(ctx.workdir, "af-browser-tools.json");
+      const timeoutS = REAL_EXEC.browserTimeout(ctx.profile);
+      return {
+        args: [command, probe, "--report", reportPath, "--timeout", String(timeoutS)],
+        reportPath,
+        cmdLabel: `af-browser-tools ${command} ${probe} --report af-browser-tools.json --timeout ${timeoutS}`,
+      };
+    },
+    async parse({ reportPath, ctx }) {
+      return parseBrowserReport(ctx, reportPath);
+    },
+  };
+}
+
+const browserReconSpec = makeBrowserSpec("BROWSER_RECON", "recon");
+const domSinkScanSpec = makeBrowserSpec("DOM_SINK_SCAN", "domxss");
+const jsLibAuditSpec = makeBrowserSpec("JS_LIB_AUDIT", "jslibs");
+const formAuditSpec = makeBrowserSpec("FORM_AUDIT", "forms");
+
 export const ARSENAL_SPECS = {
   SUBFINDER: subfinderSpec,
   AMASS: amassSpec,
@@ -2310,4 +2440,9 @@ export const ARSENAL_SPECS = {
   WAFW00F: wafw00fSpec,
   HYDRA: hydraSpec,
   JOHN: johnSpec,
+  // Sprint 3 — navigateur headless (wrapper af-browser-tools, Chromium)
+  BROWSER_RECON: browserReconSpec,
+  DOM_SINK_SCAN: domSinkScanSpec,
+  JS_LIB_AUDIT: jsLibAuditSpec,
+  FORM_AUDIT: formAuditSpec,
 } as const satisfies Record<string, ArsenalSpec>;

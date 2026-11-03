@@ -64,6 +64,8 @@ const TOOLS: Tool[] = [
   "SEMGREP", "TRIVY", "GITLEAKS",
   "SQLMAP", "FFUF",
   "WPSCAN", "DALFOX", "WHATWEB", "TESTSSL", "WAFW00F", "HYDRA", "JOHN",
+  // Sprint 3 — navigateur headless (wrapper af-browser-tools, Chromium)
+  "BROWSER_RECON", "DOM_SINK_SCAN", "JS_LIB_AUDIT", "FORM_AUDIT",
 ];
 const PROFILES: Profile[] = ["QUICK", "STANDARD", "DEEP"];
 const TARGET_TYPES: TargetType[] = ["URL", "GIT", "NETWORK"];

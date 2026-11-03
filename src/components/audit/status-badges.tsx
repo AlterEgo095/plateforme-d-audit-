@@ -330,6 +330,11 @@ const TOOL_COLORS: Record<Tool, string> = {
   WAFW00F: "#d946ef",
   HYDRA: "#f43f5e",
   JOHN: "#78716c",
+  // Sprint 3 — navigateur headless (Chromium, teintes teal/zinc)
+  BROWSER_RECON: "#0ea5a4",
+  DOM_SINK_SCAN: "#f59e0b",
+  JS_LIB_AUDIT: "#10b981",
+  FORM_AUDIT: "#a1a1aa",
 };
 
 // M4 (audit 8-a) : les cibles supportées dérivent de TOOL_TARGET_COMPAT
@@ -481,6 +486,31 @@ export const TOOL_META: Record<
     description: "Craquage de hashes faibles du dépôt (wordlist)",
     supportedTargets: TOOL_TARGET_COMPAT.JOHN,
   },
+  // Sprint 3 — navigateur headless
+  BROWSER_RECON: {
+    label: "BrowserRecon",
+    color: TOOL_COLORS.BROWSER_RECON,
+    description: "Empreinte technologique au rendu réel (Chromium)",
+    supportedTargets: TOOL_TARGET_COMPAT.BROWSER_RECON,
+  },
+  DOM_SINK_SCAN: {
+    label: "DomSinkScan",
+    color: TOOL_COLORS.DOM_SINK_SCAN,
+    description: "Sinks DOM et flux DOM XSS potentiels au rendu",
+    supportedTargets: TOOL_TARGET_COMPAT.DOM_SINK_SCAN,
+  },
+  JS_LIB_AUDIT: {
+    label: "JsLibAudit",
+    color: TOOL_COLORS.JS_LIB_AUDIT,
+    description: "Versions des libs front + CVE connues (SCA)",
+    supportedTargets: TOOL_TARGET_COMPAT.JS_LIB_AUDIT,
+  },
+  FORM_AUDIT: {
+    label: "FormAudit",
+    color: TOOL_COLORS.FORM_AUDIT,
+    description: "Sécurité des formulaires et iframes (credentials, CSRF)",
+    supportedTargets: TOOL_TARGET_COMPAT.FORM_AUDIT,
+  },
 };
 
 /** P5 : libellés FR des familles (regroupement de l'assistant de campagne). */
@@ -490,6 +520,7 @@ export const TOOL_FAMILY_LABELS: Record<string, string> = {
   DAST: "Scan dynamique (DAST)",
   CODE: "Analyse de code",
   EXPLOIT: "Exploitation ciblée",
+  BROWSER: "Navigateur headless",
 };
 
 export function toolFamilyOf(tool: Tool): string {

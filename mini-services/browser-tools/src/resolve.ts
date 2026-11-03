@@ -4,7 +4,7 @@
  * Stratégie (sans variable d'environnement imposée — l'env du moteur est
  * allowlistée) :
  *   1. AF_CHROMIUM_BIN (surcharge explicite du wrapper) ;
- *   2. cache Playwright ~/.cache/ms-playwright/chromium-*/chrome-linux*/chrome
+ *   2. cache Playwright ~/.cache/ms-playwright/chromium-XXXX/chrome-linuxXXXX/chrome
  *      (version la plus haute) ;
  *   3. binaires système (chromium, chromium-browser, google-chrome…) via PATH.
  */

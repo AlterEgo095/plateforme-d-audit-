@@ -62,6 +62,8 @@ export const TOOLS: Tool[] = [
   'SEMGREP', 'TRIVY', 'GITLEAKS',
   'SQLMAP', 'FFUF',
   'WPSCAN', 'DALFOX', 'WHATWEB', 'TESTSSL', 'WAFW00F', 'HYDRA', 'JOHN',
+  // Sprint 3 — navigateur headless (wrapper af-browser-tools, Chromium)
+  'BROWSER_RECON', 'DOM_SINK_SCAN', 'JS_LIB_AUDIT', 'FORM_AUDIT',
 ]
 export const SCAN_STATUSES: ScanStatus[] = ['QUEUED', 'RUNNING', 'COMPLETED', 'FAILED', 'CANCELLED']
 export const TARGET_TYPES: TargetType[] = ['URL', 'GIT', 'NETWORK']
@@ -70,7 +72,7 @@ export const PROFILES: Profile[] = ['QUICK', 'STANDARD', 'DEEP']
 export const CASE_STATUSES: CaseStatus[] = ['OPEN', 'AUTHORIZED', 'RUNNING', 'REPORTED', 'CLOSED']
 
 /** P5 : familles d'outils (regroupement du catalogue et de l'assistant campagne). */
-export type ToolFamily = 'AGENT' | 'RECON' | 'DAST' | 'CODE' | 'EXPLOIT'
+export type ToolFamily = 'AGENT' | 'RECON' | 'DAST' | 'CODE' | 'EXPLOIT' | 'BROWSER'
 
 export const TOOL_FAMILY: Record<Tool, ToolFamily> = {
   PHANTOM: 'AGENT',
@@ -96,6 +98,11 @@ export const TOOL_FAMILY: Record<Tool, ToolFamily> = {
   WAFW00F: 'RECON',
   HYDRA: 'EXPLOIT',
   JOHN: 'EXPLOIT',
+  // Sprint 3 — navigateur headless
+  BROWSER_RECON: 'BROWSER',
+  DOM_SINK_SCAN: 'BROWSER',
+  JS_LIB_AUDIT: 'BROWSER',
+  FORM_AUDIT: 'BROWSER',
 }
 
 export const TOOL_FAMILY_LABEL: Record<ToolFamily, string> = {
@@ -104,6 +111,7 @@ export const TOOL_FAMILY_LABEL: Record<ToolFamily, string> = {
   DAST: 'Scan dynamique (DAST)',
   CODE: 'Analyse de code (SAST / SCA / secrets)',
   EXPLOIT: 'Exploitation ciblée',
+  BROWSER: 'Navigateur headless',
 }
 
 /** Poids de tri des sévérités (du plus grave au moins grave). */
@@ -150,6 +158,11 @@ export const TOOL_TARGET_COMPAT: Record<Tool, TargetType[]> = {
   WAFW00F: ['URL'], // URL de base de détection WAF
   HYDRA: ['NETWORK'], // hôte unique (module SSH, identifiants par défaut)
   JOHN: ['GIT'], // hashes faibles dans le dépôt cloné
+  // Sprint 3 — navigateur headless (rendu d'une URL réelle en Chromium)
+  BROWSER_RECON: ['URL'],
+  DOM_SINK_SCAN: ['URL'],
+  JS_LIB_AUDIT: ['URL'],
+  FORM_AUDIT: ['URL'],
 }
 
 export function isToolCompatible(tool: Tool, targetType: TargetType): boolean {

@@ -72,6 +72,12 @@ const FAMILY_META: Array<{
     description:
       "Confirmation active : injection SQL et fuzzing de répertoires (usage encadré).",
   },
+  {
+    id: "BROWSER",
+    label: "Navigateur headless (Chromium)",
+    description:
+      "Sprint 3 — rendu réel de l'application en Chromium headless : empreinte JavaScript, analyse des sinks DOM, CVE des libs front et sécurité des formulaires.",
+  },
 ];
 
 // ─── Boîte du schéma d'architecture ──────────────────────────────────

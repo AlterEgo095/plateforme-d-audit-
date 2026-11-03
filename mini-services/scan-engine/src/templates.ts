@@ -43,6 +43,11 @@ export const TOOL_FACTORS: Record<Tool, number> = {
   WAFW00F: 0.2,
   HYDRA: 0.35,
   JOHN: 0.3,
+  // Sprint 3 — navigateur headless (rendu Chromium rapide)
+  BROWSER_RECON: 0.2,
+  DOM_SINK_SCAN: 0.22,
+  JS_LIB_AUDIT: 0.18,
+  FORM_AUDIT: 0.18,
 };
 
 export const PHASES: Record<Tool, { name: string; frac: number }[]> = {
@@ -185,6 +190,31 @@ export const PHASES: Record<Tool, { name: string; frac: number }[]> = {
     { name: "CHARGEMENT HASHES", frac: 0.28 },
     { name: "CRAQUAGE WORDLIST", frac: 0.42 },
     { name: "RAPPORT", frac: 0.2 },
+  ],
+  // Sprint 3 — navigateur headless
+  BROWSER_RECON: [
+    { name: "INIT", frac: 0.12 },
+    { name: "RENDU NAVIGATEUR", frac: 0.48 },
+    { name: "ANALYSE DOM", frac: 0.28 },
+    { name: "CONSOLIDATION", frac: 0.12 },
+  ],
+  DOM_SINK_SCAN: [
+    { name: "INIT", frac: 0.1 },
+    { name: "RENDU NAVIGATEUR", frac: 0.4 },
+    { name: "ANALYSE SINKS", frac: 0.38 },
+    { name: "CONSOLIDATION", frac: 0.12 },
+  ],
+  JS_LIB_AUDIT: [
+    { name: "INIT", frac: 0.1 },
+    { name: "RENDU NAVIGATEUR", frac: 0.42 },
+    { name: "INVENTAIRE LIBS", frac: 0.36 },
+    { name: "CONSOLIDATION", frac: 0.12 },
+  ],
+  FORM_AUDIT: [
+    { name: "INIT", frac: 0.1 },
+    { name: "RENDU NAVIGATEUR", frac: 0.42 },
+    { name: "AUDIT FORMULAIRES", frac: 0.36 },
+    { name: "CONSOLIDATION", frac: 0.12 },
   ],
 };
 
@@ -1953,6 +1983,236 @@ export const FINDING_POOLS: Record<Tool, FindingTemplate[]> = {
       sentinel: false,
     },
   ],
+  // ── Sprint 3 — navigateur headless : pools de simulation ──
+  BROWSER_RECON: [
+    {
+      key: "br1",
+      title: "Contenu mixte HTTP/HTTPS (mixed content)",
+      severity: "MEDIUM",
+      confidence: "CONFIRMED",
+      category: "web",
+      cvss: 5.4,
+      location: "<TARGET>/ — ressources chargées en http://",
+      description:
+        "La page HTTPS charge des ressources en http:// (scripts, images, iframes) : un attaquant en position réseau " +
+        "peut substituer ces ressources (script malveillant injecté) sans alerte visible pour l'utilisateur.",
+      evidence:
+        "src: http://cdn.example.com/lib.js\n" +
+        "img: http://tracking.example.com/pixel.gif\n" +
+        "rendu Chromium : 2 ressources actives en http://",
+      poc: "af-browser-tools recon <TARGET> --report recon.json",
+      remediation: "Migrer toutes les ressources en https:// (ou URLs relatives), activer CSP upgrade-insecure-requests.",
+      sentinel: false,
+    },
+    {
+      key: "br2",
+      title: "3 technologies front exposées avec versions précises",
+      severity: "LOW",
+      confidence: "CONFIRMED",
+      category: "info-disclosure",
+      cvss: 3.1,
+      location: "<TARGET>/ — variables globales et URLs de scripts",
+      description:
+        "Les versions exactes des bibliothèques front (jQuery 1.12.4, Bootstrap 3.3.7, WordPress 6.2) sont publiquement " +
+        "dérivables du rendu : cette cartographie oriente la sélection d'exploits connus sans phase de reconnaissance.",
+      evidence:
+        "jQuery[1.12.4] (window.jQuery)\n" +
+        "Bootstrap[3.3.7] (/bootstrap.min.js?ver=3.3.7)\n" +
+        "WordPress[6.2] (meta generator)",
+      poc: "af-browser-tools recon <TARGET> --report recon.json",
+      remediation: "Empaqueter les dépendances sans version dans le nom, retirer la meta generator, maintenir les libs à jour.",
+      sentinel: false,
+    },
+    {
+      key: "br3",
+      title: "Empreinte navigateur : stack complète identifiée en rendu réel",
+      severity: "INFO",
+      confidence: "CONFIRMED",
+      category: "recon",
+      cvss: 0,
+      location: "<TARGET>/",
+      description:
+        "Rendu Chromium headless complet : technologies identifiées en conditions réelles d'exécution JavaScript — " +
+        "ce que les scanners HTTP seuls (WhatWeb, HTTPX) ne voient pas (libs sans empreinte réseau).",
+      evidence:
+        "Titre: « Bienvenue »\n" +
+        "DOM: 412 nœuds, 8 scripts (5 externes), 2 formulaires\n" +
+        "Requêtes: 23 — Chargement: 612 ms\n" +
+        "Headers: server[nginx/1.18.0], x-powered-by[PHP/7.4.3]",
+      poc: "af-browser-tools recon <TARGET> --report recon.json",
+      remediation: "Réduire l'empreinte (versions visibles, en-têtes, chemins génériques) — défense en profondeur, pas une faille en soi.",
+      sentinel: false,
+    },
+  ],
+  DOM_SINK_SCAN: [
+    {
+      key: "ds1",
+      title: "Flux de données contrôlé vers sink DOM « innerHTML »",
+      severity: "HIGH",
+      confidence: "UNVERIFIED",
+      category: "xss",
+      cvss: 8.1,
+      location: "<TARGET>/ — script inline",
+      description:
+        "Une valeur contrôlable par l'attaquant (fragment d'URL) atteint innerHTML sans échappement visible : DOM XSS " +
+        "potentiel. L'analyse est statique — un contre-flux (encodage, DOMPurify) peut exister, à confirmer avec un payload.",
+      evidence:
+        "var frag = location.hash.substring(1);\n" +
+        "document.getElementById('out').innerHTML = '<b>' + frag + '</b>';",
+      poc: "Ouvrir <TARGET>#<img src=x onerror=alert(1)> puis observer l'exécution du handler onerror.",
+      remediation: "Utiliser textContent, encoder au contexte d'affichage, DOMPurify pour le HTML riche, CSP sans unsafe-eval.",
+      sentinel: false,
+    },
+    {
+      key: "ds2",
+      title: "Écouteur postMessage sans validation d'origine",
+      severity: "MEDIUM",
+      confidence: "PROBABLE",
+      category: "auth",
+      cvss: 6.1,
+      location: "<TARGET>/ — addEventListener('message')",
+      description:
+        "Un handler postMessage ne vérifie pas event.origin : n'importe quel site tiers peut lui envoyer des messages " +
+        "traités comme des données de confiance (injection DOM, actions sensibles, exfiltration).",
+      evidence:
+        "window.addEventListener('message', function(e){ document.title = 'msg:' + e.data; });\n" +
+        "— aucune référence event.origin dans le script",
+      poc: "window.open('CIBLE').postMessage('<img src=x onerror=alert(1)>','*') depuis une autre origine.",
+      remediation: "Vérifier event.origin contre une allowlist stricte, valider le schéma du message, ne jamais innerHTMLer un message.",
+      sentinel: false,
+    },
+    {
+      key: "ds3",
+      title: "Évaluation dynamique de code présente (eval / new Function)",
+      severity: "INFO",
+      confidence: "CONFIRMED",
+      category: "xss",
+      cvss: 0,
+      location: "<TARGET>/ — scripts applicatifs",
+      description:
+        "eval()/new Function() sont présents dans les scripts de la page : leur présence interdit l'usage d'une CSP sans " +
+        "unsafe-eval et élargit la surface d'injection si une donnée contrôlée y transitait.",
+      evidence: "function dbg(s){ return eval(s); } — script inline\n2 unités de code contiennent une évaluation dynamique",
+      poc: "grep -oE 'eval\\(' scripts/*.js — présence confirmée au rendu.",
+      remediation: "Remplacer eval par JSON.parse/indexation, activer une CSP sans unsafe-eval, isoler les libs legacy.",
+      sentinel: false,
+    },
+  ],
+  JS_LIB_AUDIT: [
+    {
+      key: "jl1",
+      title: "jQuery 1.12.4 — CVE-2020-11022 (XSS via .html() non fiable)",
+      severity: "MEDIUM",
+      confidence: "CONFIRMED",
+      category: "cve",
+      cve: "CVE-2020-11022",
+      cvss: 6.9,
+      location: "<TARGET>/js/jquery-1.12.4.min.js",
+      description:
+        "jQuery en version 1.12.4 est exposée publiquement et affectée par CVE-2020-11022 (CVSS 6.9) : XSS lors du " +
+        "passage de HTML non fiable à .html()/append(). 3 CVE connues s'appliquent à cette version (fixées à partir de 3.5.0).",
+      evidence:
+        "jQuery 1.12.4 détectée via /js/jquery-1.12.4.min.js\n" +
+        "CVE-2020-11022 (CVSS 6.9) — fix 3.5.0 : XSS .html()\n" +
+        "CVE-2020-11023 (CVSS 6.9) — fix 3.5.0 : XSS <option>\n" +
+        "CVE-2019-11358 (CVSS 6.1) — fix 3.4.0 : prototype pollution",
+      poc: "af-browser-tools jslibs <TARGET> --report jslibs.json",
+      remediation: "Mettre à jour jQuery vers ≥ 3.5.0, vérifier la compatibilité des plugins legacy.",
+      sentinel: false,
+    },
+    {
+      key: "jl2",
+      title: "4 script(s) tiers sans attribut d'intégrité (SRI)",
+      severity: "LOW",
+      confidence: "CONFIRMED",
+      category: "sca",
+      cvss: 3.7,
+      location: "<TARGET>/ — CDN externes",
+      description:
+        "Des scripts chargés depuis des origines tierces (CDN) n'ont pas d'attribut integrity : si le CDN est compromis " +
+        "(ou MITM avant HSTS), le code substitué s'exécute avec l'origine de la page.",
+      evidence:
+        "https://cdn.example.com/lib.js (sans integrity)\n" +
+        "https://analytics.example.com/tag.js (sans integrity)",
+      poc: "af-browser-tools jslibs <TARGET> --report jslibs.json",
+      remediation: "Ajouter integrity=\"sha384-…\" + crossorigin=\"anonymous\", ou auto-héberger les dépendances critiques.",
+      sentinel: false,
+    },
+    {
+      key: "jl3",
+      title: "5 bibliothèque(s) front identifiée(s)",
+      severity: "INFO",
+      confidence: "CONFIRMED",
+      category: "sca",
+      cvss: 0,
+      location: "<TARGET>/",
+      description:
+        "Inventaire des bibliothèques client chargées par la page (variables globales + URLs de scripts réseau, rendu " +
+        "Chromium réel). Cet inventaire alimente la veille CVE sur la stack front.",
+      evidence:
+        "jQuery 1.12.4 (window.jQuery)\n" +
+        "Bootstrap 3.3.7 (/bootstrap.min.js)\n" +
+        "Moment.js (version indéterminée) — /vendor/moment.min.js",
+      poc: "af-browser-tools jslibs <TARGET> --report jslibs.json",
+      remediation: "Maintenir un inventaire SCA à jour (bundle analyser) et suivre les advisories des libs front.",
+      sentinel: false,
+    },
+  ],
+  FORM_AUDIT: [
+    {
+      key: "fa1",
+      title: "Mot de passe transmis en clair (formulaire en HTTP)",
+      severity: "HIGH",
+      confidence: "CONFIRMED",
+      category: "auth",
+      cvss: 8.2,
+      location: "<TARGET>/login — action http://",
+      description:
+        "Un formulaire contenant un champ mot de passe poste vers une URL http:// : les credentials circulent en clair " +
+        "et sont capturables par quiconque écoute le réseau (wifi partagé, proxy, FAI).",
+      evidence:
+        "Page: <TARGET> (http)\n" +
+        "Action: <TARGET>/login\n" +
+        "Méthode: POST, champs: 3",
+      poc: "tcpdump -A -i any port 80 — le POST /login est lisible en clair.",
+      remediation: "Basculer l'action en https://, redirection 301 permanente + HSTS.",
+      sentinel: false,
+    },
+    {
+      key: "fa2",
+      title: "Aucun jeton anti-CSRF visible (formulaire POST)",
+      severity: "LOW",
+      confidence: "PROBABLE",
+      category: "auth",
+      cvss: 3.9,
+      location: "<TARGET>/login",
+      description:
+        "Heuristique : aucun champ caché de type CSRF/token/nonce dans ce formulaire POST. Le jeton peut être porté par " +
+        "un en-tête (framework JS) — sinon une protection CSRF manque (action forcée par un site tiers).",
+      evidence: "Champs cachés: [\"step\"]\nAction: <TARGET>/login",
+      poc: "curl -i -X POST <TARGET>/login -d 'user=x&pass=y' sans jeton — traitement accepté ?",
+      remediation: "Jeton anti-CSRF synchronisé (ou SameSite=Lax/Strict + vérification Origin) sur les actions modifiantes.",
+      sentinel: false,
+    },
+    {
+      key: "fa3",
+      title: "Surface d'authentification exposée (2 champ(s) mot de passe)",
+      severity: "INFO",
+      confidence: "CONFIRMED",
+      category: "auth",
+      cvss: 0,
+      location: "<TARGET>/",
+      description:
+        "La page expose des champs mot de passe : cible naturelle du brute-force, du credential stuffing et du phishing " +
+        "— vérifier rate limiting, MFA et messages d'erreur non discriminants.",
+      evidence:
+        "form#1 POST /login password=true champs=3\n" +
+        "form#2 GET /search password=true champs=1",
+      poc: "af-browser-tools forms <TARGET> --report forms.json",
+      remediation: "Rate limiting par compte ET par IP, MFA, CAPTCHA progressif, journalisation des tentatives.",
+      sentinel: false,
+    },
+  ],
   TESTSSL: [
     {
       key: "ts1",
@@ -2474,6 +2734,39 @@ const NOISE_POOLS: Record<Tool, ((target: string) => RawLine)[]> = {
     () => ({ level: "WARN", source: "net", message: "redirection suivie : 2 sauts (301 → 200)" }),
     () => ({ level: "INFO", source: "whatweb", message: "log JSON : 1 cible, 18 plugins" }),
     () => ({ level: "INFO", source: "whatweb", message: "aggressiveness level 3 : 412 requêtes" }),
+  ],
+  // ── Sprint 3 — navigateur headless : bruit de simulation ──
+  BROWSER_RECON: [
+    () => ({ level: "INFO", source: "browser", message: "chromium 143 — sandbox désactivée, viewport 1366×900" }),
+    () => ({ level: "INFO", source: "net", message: "23 requêtes — 21 OK, 2 statiques servies du cache" }),
+    () => ({ level: "WARN", source: "browser", message: "networkidle non atteint (beacon analytics) — poursuite de l'analyse" }),
+    () => ({ level: "INFO", source: "browser", message: "7 technologies identifiées (globals + URLs de scripts)" }),
+    () => ({ level: "INFO", source: "browser", message: "rendu DOM complet : 412 nœuds, 8 scripts (5 externes)" }),
+    () => ({ level: "INFO", source: "browser", message: "rapport JSON : af-browser-tools.json" }),
+  ],
+  DOM_SINK_SCAN: [
+    () => ({ level: "INFO", source: "browser", message: "collecte : 3 scripts inline + 5 externes (3 same-origin récupérés)" }),
+    () => ({ level: "INFO", source: "browser", message: "sources traquées : location.*, window.name, event.data, URLSearchParams" }),
+    () => ({ level: "WARN", source: "browser", message: "8 patterns de sinks évalués (innerHTML, document.write, eval… )" }),
+    () => ({ level: "INFO", source: "browser", message: "corrélation source→sink : 1 unité de code suspecte" }),
+    () => ({ level: "WARN", source: "net", message: "1 script externe CORS-protégé — analyse limitée (surface réduite)" }),
+    () => ({ level: "INFO", source: "browser", message: "rapport JSON : af-browser-tools.json (flux, sinks, postMessage)" }),
+  ],
+  JS_LIB_AUDIT: [
+    () => ({ level: "INFO", source: "browser", message: "sonde des globals : jQuery, _, moment, Vue, React… (13 variables testées)" }),
+    () => ({ level: "INFO", source: "browser", message: "inventaire réseau : 5 scripts externes, 3 avec ?ver= exploitable" }),
+    () => ({ level: "WARN", source: "browser", message: "base CVE embarquée : 11 familles de libs front (fix connus)" }),
+    () => ({ level: "INFO", source: "browser", message: "SRI : 2/5 scripts tiers signés (integrity=sha384-…)" }),
+    () => ({ level: "WARN", source: "browser", message: "1 lib en fin de vie détectée (AngularJS 1.x) — pas de correctif futur" }),
+    () => ({ level: "INFO", source: "browser", message: "rapport JSON : af-browser-tools.json (libs, CVE, SRI)" }),
+  ],
+  FORM_AUDIT: [
+    () => ({ level: "INFO", source: "browser", message: "inventaire : 2 formulaires, 1 iframe tierce, 2 champs mot de passe" }),
+    () => ({ level: "INFO", source: "browser", message: "analyse des actions : origine, protocole, méthode de chaque form" }),
+    () => ({ level: "WARN", source: "browser", message: "jetons CSRF heuristiques : csrf|token|nonce|_wpnonce|authenticity" }),
+    () => ({ level: "INFO", source: "browser", message: "autocomplete des champs password : 1/2 restreint" }),
+    () => ({ level: "WARN", source: "net", message: "iframe cross-origin sans sandbox — clickjacking à évaluer" }),
+    () => ({ level: "INFO", source: "browser", message: "rapport JSON : af-browser-tools.json (forms, credentials, iframes)" }),
   ],
   TESTSSL: [
     () => ({ level: "INFO", source: "testssl", message: "openssl dédié : /opt/testssl.sh/bin/openssl.Linux.x86_64" }),
@@ -3168,6 +3461,84 @@ export const SCRIPT_BUILDERS: Record<Tool, (ctx: ScriptCtx) => ScriptLine[]> = {
       [
         { level: "INFO", source: "john", message: `${effectiveFindingCount("JOHN", ctx.profile)} constats documentés (hashes détectés, craqués, résistants)` },
         { level: "SUCCESS", source: "john", message: "session completed — pot file locale au conteneur" },
+      ],
+    ]),
+  // ── Sprint 3 — navigateur headless : builders de simulation ──
+  BROWSER_RECON: (ctx) =>
+    assemble("BROWSER_RECON", ctx, [
+      [
+        { level: "INFO", source: "browser", message: `rendu Chromium headless de ${hostOf(ctx.target)}` },
+        { level: "CMD", source: "browser", message: "$ af-browser-tools recon <cible> --report af-browser-tools.json --timeout 90" },
+      ],
+      [
+        { level: "INFO", source: "browser", message: "chromium 143 lancé — navigation domcontentloaded puis networkidle (8s max)" },
+        { level: "INFO", source: "net", message: "HTTP 200 — 23 requêtes réseau, 612 ms de rendu" },
+        { level: "INFO", source: "browser", message: "DOM rendu : 412 nœuds, 8 scripts, 2 formulaires, 1 iframe" },
+      ],
+      [
+        { level: "INFO", source: "browser", message: "analyse : 7 technologies, mixed content 2, meta generator 1, headers divulgués 2" },
+        { level: "INFO", source: "browser", message: "TLS : page servie en https — redirection http→https effective" },
+      ],
+      [
+        { level: "INFO", source: "browser", message: `${effectiveFindingCount("BROWSER_RECON", ctx.profile)} constats documentés (empreinte, versions, mixed content)` },
+        { level: "SUCCESS", source: "browser", message: "rapport écrit : af-browser-tools.json" },
+      ],
+    ]),
+  DOM_SINK_SCAN: (ctx) =>
+    assemble("DOM_SINK_SCAN", ctx, [
+      [
+        { level: "INFO", source: "browser", message: `analyse des sinks DOM de ${hostOf(ctx.target)}` },
+        { level: "CMD", source: "browser", message: "$ af-browser-tools domxss <cible> --report af-browser-tools.json --timeout 90" },
+      ],
+      [
+        { level: "INFO", source: "browser", message: "rendu terminé — collecte de 3 scripts inline + 5 externes" },
+        { level: "INFO", source: "net", message: "3 scripts same-origin récupérés pour analyse statique (CORS sur 2 tiers)" },
+      ],
+      [
+        { level: "INFO", source: "browser", message: "corrélation source→sink : 1 flux inline suspect (location.hash → innerHTML)" },
+        { level: "WARN", source: "browser", message: "postMessage sans validation d'origine : 1 handler" },
+      ],
+      [
+        { level: "INFO", source: "browser", message: `${effectiveFindingCount("DOM_SINK_SCAN", ctx.profile)} constats documentés (flux, sinks, postMessage, srcdoc)` },
+        { level: "SUCCESS", source: "browser", message: "rapport écrit : af-browser-tools.json" },
+      ],
+    ]),
+  JS_LIB_AUDIT: (ctx) =>
+    assemble("JS_LIB_AUDIT", ctx, [
+      [
+        { level: "INFO", source: "browser", message: `inventaire des bibliothèques front de ${hostOf(ctx.target)}` },
+        { level: "CMD", source: "browser", message: "$ af-browser-tools jslibs <cible> --report af-browser-tools.json --timeout 90" },
+      ],
+      [
+        { level: "INFO", source: "browser", message: "sonde des globals : 13 variables testées au rendu (jQuery, _, moment… )" },
+        { level: "INFO", source: "net", message: "5 scripts réseau analysés — 3 avec ?ver= exploitable" },
+      ],
+      [
+        { level: "INFO", source: "browser", message: "corrélation CVE : 1 lib vulnérable confirmée (jQuery 1.12.4 → 3 CVE)" },
+        { level: "WARN", source: "browser", message: "SRI absent sur 2 scripts tiers" },
+      ],
+      [
+        { level: "INFO", source: "browser", message: `${effectiveFindingCount("JS_LIB_AUDIT", ctx.profile)} constats documentés (CVE, SRI, inventaire)` },
+        { level: "SUCCESS", source: "browser", message: "rapport écrit : af-browser-tools.json" },
+      ],
+    ]),
+  FORM_AUDIT: (ctx) =>
+    assemble("FORM_AUDIT", ctx, [
+      [
+        { level: "INFO", source: "browser", message: `audit des formulaires de ${hostOf(ctx.target)}` },
+        { level: "CMD", source: "browser", message: "$ af-browser-tools forms <cible> --report af-browser-tools.json --timeout 90" },
+      ],
+      [
+        { level: "INFO", source: "browser", message: "rendu terminé — 2 formulaires, 1 iframe tierce, 2 champs mot de passe" },
+        { level: "INFO", source: "browser", message: "résolution des actions : origine, protocole, méthode" },
+      ],
+      [
+        { level: "WARN", source: "browser", message: "1 formulaire POST sans jeton anti-CSRF visible (heuristique)" },
+        { level: "INFO", source: "browser", message: "autocomplete password restreint : 1/2" },
+      ],
+      [
+        { level: "INFO", source: "browser", message: `${effectiveFindingCount("FORM_AUDIT", ctx.profile)} constats documentés (credentials, CSRF, iframes)` },
+        { level: "SUCCESS", source: "browser", message: "rapport écrit : af-browser-tools.json" },
       ],
     ]),
 };

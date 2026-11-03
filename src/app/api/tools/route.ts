@@ -401,6 +401,83 @@ const TOOL_CATALOG: Omit<ToolInfo, 'status'>[] = [
     supportedTargets: [...TOOL_TARGET_COMPAT.JOHN],
     family: 'EXPLOIT',
   },
+  // ── Sprint 3 — navigateur headless (wrapper af-browser-tools, Chromium) ──
+  {
+    id: 'BROWSER_RECON',
+    name: 'BrowserRecon',
+    description:
+      "Empreinte technologique en RENDU RÉEL (Chromium headless) : technologies détectées via variables globales " +
+      "et trafic réseau (ce que les scanners HTTP ne voient pas), mixed content, métadonnées generator, en-têtes " +
+      "divulgués, absence de TLS. Complément exact de WhatWeb pour les applications JavaScript modernes.",
+    nature: 'Rendu navigateur headless (playwright-core + Chromium)',
+    integration: 'Chromium 143+, rendu domcontentloaded + networkidle, rapport JSON',
+    sandbox: 'Sans sandbox — navigation standard d\'un navigateur, dialogues bloqués, pas de clic',
+    capabilities: [
+      'Détection des libs front par globals + URLs (versions exactes)',
+      'Mixed content HTTP/HTTPS au rendu réel',
+      'En-têtes serveur et meta generator divulgués',
+      'Statistiques DOM (nœuds, scripts, requêtes)',
+    ],
+    supportedTargets: [...TOOL_TARGET_COMPAT.BROWSER_RECON],
+    family: 'BROWSER',
+  },
+  {
+    id: 'DOM_SINK_SCAN',
+    name: 'DomSinkScan',
+    description:
+      "Analyse statique des sources/sinks DOM au rendu réel : flux contrôlés vers innerHTML/document.write/eval " +
+      "(DOM XSS potentiel), handlers postMessage sans validation d'origine, iframes srcdoc, évaluation dynamique " +
+      "de code. Les flux au sein des bibliothèques tierces sont dégradés (faux positifs probables).",
+    nature: 'Analyse statique DOM (scripts inline + same-origin récupérés)',
+    integration: 'Corrélation source→sink sur 8 patterns de sinks, 8 sources traquées',
+    sandbox: 'Sans sandbox — lecture seule du DOM et des scripts, aucune interaction ni payload envoyé',
+    capabilities: [
+      'Flux source→sink DOM XSS (UNVERIFIED, PoC console fourni)',
+      'postMessage sans event.origin (MEDIUM)',
+      'Sinks isolés dans le code applicatif (dette XSS)',
+      'iframes srcdoc et eval/new Function',
+    ],
+    supportedTargets: [...TOOL_TARGET_COMPAT.DOM_SINK_SCAN],
+    family: 'BROWSER',
+  },
+  {
+    id: 'JS_LIB_AUDIT',
+    name: 'JsLibAudit',
+    description:
+      "SCA front : inventaire des bibliothèques client (jQuery, Lodash, Bootstrap, Vue, AngularJS, Moment…) avec " +
+      "versions exactes, corrélation avec une base CVE embarquée (11 familles, correctifs connus), détection des " +
+      "libs en fin de vie et des scripts tiers sans attribut d'intégrité (SRI).",
+    nature: 'Software Composition Analysis côté navigateur',
+    integration: 'Base CVE front embarquée (mise à jour à chaque sprint), détection globals + URLs ?ver=',
+    sandbox: 'Sans sandbox — inventaire passif au rendu, aucune requête vers des services tiers',
+    capabilities: [
+      'Versions exactes des libs front (globals + ?ver=)',
+      'CVE front connues (jQuery < 3.5, Lodash < 4.17.21, Bootstrap < 4.3.1…)',
+      'Bibliothèques EOL (AngularJS 1.x)',
+      'Scripts CDN sans SRI (integrity)',
+    ],
+    supportedTargets: [...TOOL_TARGET_COMPAT.JS_LIB_AUDIT],
+    family: 'BROWSER',
+  },
+  {
+    id: 'FORM_AUDIT',
+    name: 'FormAudit',
+    description:
+      "Audit de sécurité des formulaires et iframes au rendu réel : mots de passe transmis en HTTP ou vers un " +
+        "domaine tiers (credential harvesting), champs password en GET, autocomplete non restreint, jetons anti-CSRF " +
+        "absents (heuristique), iframes tierces sans sandbox, surface d'authentification exposée.",
+    nature: 'Audit des formulaires DOM (actions résolues, origine, protocole)',
+    integration: '2 HIGH patterns credentials (HTTP / cross-origin), CSRF heuristique, sandbox iframes',
+    sandbox: 'Sans sandbox — lecture seule du DOM, aucun formulaire soumis',
+    capabilities: [
+      'Credentials en clair (action HTTP) — HIGH',
+      'Envoi de credentials vers un domaine tiers — HIGH',
+      'Password en GET, autocomplete, absence de jeton CSRF',
+      'Iframes tierces sans sandbox',
+    ],
+    supportedTargets: [...TOOL_TARGET_COMPAT.FORM_AUDIT],
+    family: 'BROWSER',
+  },
 ]
 
 export const GET = withApi(async () => {

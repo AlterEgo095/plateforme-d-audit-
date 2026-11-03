@@ -45,10 +45,14 @@ export type Tool =
   | "TESTSSL"
   | "WAFW00F"
   | "HYDRA"
-  | "JOHN";
+  | "JOHN"
+  | "BROWSER_RECON"
+  | "DOM_SINK_SCAN"
+  | "JS_LIB_AUDIT"
+  | "FORM_AUDIT";
 
 /** Famille d'un outil (P5 — regroupement du catalogue et de l'UI campagne). */
-export type ToolFamily = "AGENT" | "RECON" | "DAST" | "CODE" | "EXPLOIT";
+export type ToolFamily = "AGENT" | "RECON" | "DAST" | "CODE" | "EXPLOIT" | "BROWSER";
 
 export type TargetType = "URL" | "GIT" | "NETWORK";
 

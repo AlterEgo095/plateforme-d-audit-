@@ -127,6 +127,14 @@ export const REAL_EXEC = {
   /** Wordlist john (paquet john-data) — vérifiée à la disponibilité. */
   johnWordlist: (process.env.JOHN_WORDLIST ?? "/usr/share/john/password.lst").trim(),
 
+  // ── Sprint 3 « navigateur headless » — wrapper af-browser-tools ──────
+  /** CLI unique des 4 outils Chromium (recon|domxss|jslibs|forms). */
+  browserToolsBin: (process.env.BROWSER_TOOLS_BIN ?? "af-browser-tools").trim(),
+  /** Binaire Chromium — sondé à la disponibilité (AF_CHROMIUM_BIN côté wrapper). */
+  chromiumBin: (process.env.AF_CHROMIUM_BIN ?? "").trim(),
+  /** Timeout navigation du wrapper (par profil — secondes). */
+  browserTimeout: (profile: Profile): number => (profile === "QUICK" ? 45 : profile === "STANDARD" ? 90 : 180),
+
   /** Durées estimées (ms) pour l'affichage de progression des scans réels. */
   estimatedMs: (tool: Tool, profile: Profile): number => {
     const baseMinutes =
@@ -156,6 +164,11 @@ export const REAL_EXEC = {
           WAFW00F: { QUICK: 1, STANDARD: 2, DEEP: 4 } as Record<string, number>,
           HYDRA: { QUICK: 3, STANDARD: 6, DEEP: 12 } as Record<string, number>,
           JOHN: { QUICK: 2, STANDARD: 5, DEEP: 10 } as Record<string, number>,
+          // Sprint 3 — navigateur headless (rendu + analyse DOM)
+          BROWSER_RECON: { QUICK: 1, STANDARD: 2, DEEP: 4 } as Record<string, number>,
+          DOM_SINK_SCAN: { QUICK: 1, STANDARD: 2, DEEP: 4 } as Record<string, number>,
+          JS_LIB_AUDIT: { QUICK: 1, STANDARD: 2, DEEP: 3 } as Record<string, number>,
+          FORM_AUDIT: { QUICK: 1, STANDARD: 2, DEEP: 3 } as Record<string, number>,
         } as Record<string, Record<string, number>>
       )[tool] ?? { QUICK: 20, STANDARD: 45, DEEP: 90 };
     return (baseMinutes[profile] ?? 45) * 60_000;

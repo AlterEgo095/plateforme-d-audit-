@@ -196,6 +196,19 @@ RUN if [ "$WITH_SECLISTS" = "1" ]; then set -eux; \
       && rm -rf /usr/share/seclists/.git; \
     fi
 
+# ── Sprint 3 — navigateur headless : wrapper af-browser-tools + Chromium ────
+# Le wrapper (TypeScript Bun + playwright-core, paquet npm sans binaire natif)
+# est copié avec ses node_modules depuis mini-services/browser-tools. Chromium
+# vient du paquet Debian (dépendances natives gérées) — le wrapper le résout
+# via /usr/bin/chromium (resolve.ts) ; surcharge possible par AF_CHROMIUM_BIN
+# (cache Playwright). Même garde WITH_ARSENAL que le reste de l'arsenal.
+COPY mini-services/browser-tools /browser-tools
+RUN if [ "$WITH_ARSENAL" = "1" ]; then set -eux; \
+      apt-get update -y \
+      && apt-get install -y --no-install-recommends chromium fonts-liberation \
+      && rm -rf /var/lib/apt/lists/*; \
+    fi
+
 # Nettoyage cosmétique (fin d'étape finale) : `nuclei -update-templates` (P5)
 # laisse un résidu LevelDB temporaire dans /tmp pendant le build — purge pour
 # que l'image livrée ait un /tmp propre.
@@ -204,6 +217,12 @@ RUN rm -rf /tmp/nuclei* || true
 # Bun (binaire autonome) + code du moteur (client Prisma généré inclus).
 COPY --from=oven/bun:1 /usr/local/bin/bun /usr/local/bin/bun
 COPY --from=build /engine /engine
+
+# Shim du CLI af-browser-tools — placé après le COPY de bun (le shim pointe
+# vers lui et la sonde --version doit passer au build).
+RUN printf '#!/bin/sh\nexec /usr/local/bin/bun /browser-tools/src/cli.ts "$@"\n' > /usr/local/bin/af-browser-tools \
+      && chmod +x /usr/local/bin/af-browser-tools \
+      && af-browser-tools --version
 
 EXPOSE 3030
 

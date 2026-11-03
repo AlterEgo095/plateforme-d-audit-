@@ -107,6 +107,9 @@ const EVERGREEN_PRESETS: { id: string; label: string; tools: Tool[] }[] = [
   { id: "agents", label: "Agents IA", tools: ["PHANTOM", "DEEPAUDIT", "REDAMON", "BASALT"] },
   { id: "cms", label: "Audit CMS WordPress", tools: ["WPSCAN", "NIKTO", "NUCLEI", "WHATWEB"] },
   { id: "tls", label: "Audit TLS & périmètre", tools: ["TESTSSL", "WAFW00F", "WHATWEB", "HYDRA"] },
+  // Sprint 3 — navigateur headless (Chromium) : rendu réel + analyse DOM
+  { id: "browser", label: "Navigateur headless", tools: ["BROWSER_RECON", "DOM_SINK_SCAN", "JS_LIB_AUDIT", "FORM_AUDIT"] },
+  { id: "webjs", label: "Audit web + JavaScript", tools: ["BROWSER_RECON", "JS_LIB_AUDIT", "NUCLEI", "ZAP"] },
 ];
 
 const TARGET_PLACEHOLDERS: Record<TargetType, string> = {

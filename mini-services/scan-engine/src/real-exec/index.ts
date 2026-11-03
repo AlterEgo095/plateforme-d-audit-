@@ -61,6 +61,11 @@ const ADAPTERS: Partial<Record<Tool, () => RealToolAdapter>> = {
   WAFW00F: () => makeArsenalAdapter(ARSENAL_SPECS.WAFW00F),
   HYDRA: () => makeArsenalAdapter(ARSENAL_SPECS.HYDRA),
   JOHN: () => makeArsenalAdapter(ARSENAL_SPECS.JOHN),
+  // Sprint 3 — navigateur headless (wrapper af-browser-tools, Chromium)
+  BROWSER_RECON: () => makeArsenalAdapter(ARSENAL_SPECS.BROWSER_RECON),
+  DOM_SINK_SCAN: () => makeArsenalAdapter(ARSENAL_SPECS.DOM_SINK_SCAN),
+  JS_LIB_AUDIT: () => makeArsenalAdapter(ARSENAL_SPECS.JS_LIB_AUDIT),
+  FORM_AUDIT: () => makeArsenalAdapter(ARSENAL_SPECS.FORM_AUDIT),
 };
 
 /** Retourne l'adaptateur réel de l'outil, ou null si non implémenté. */
